@@ -1,0 +1,18 @@
+[project]
+name = "linkedin-course-downloader"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "scrapling[fetchers]",
+    "python-dotenv",
+    "tqdm",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
