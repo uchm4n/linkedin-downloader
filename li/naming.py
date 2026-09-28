@@ -32,8 +32,8 @@ def clean_dir_name(s: str) -> str:
 
 
 def course_dir(course: Course, root: Path) -> Path:
-    """Directory for a course: ``<root>/<Author> - <Course Name>``."""
-    return root / f"{course.author} - {clean_dir_name(course.name)}"
+    """Directory for a course: ``<root>/<Course Name>``"""
+    return root / clean_dir_name(course.name)
 
 
 def chapter_dir(course: Course, chapter: Chapter, root: Path) -> Path:

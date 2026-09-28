@@ -20,7 +20,7 @@ class Settings:
     email: str
     courses: list[str]
     profile_dir: Path = Path(".browser-profile")
-    headless: bool = False
+    headless: bool = True
     resolution: str = "720"
     timeout: int = 60
     output_root: Path = Path("downloads")

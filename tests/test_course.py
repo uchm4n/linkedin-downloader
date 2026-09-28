@@ -59,13 +59,13 @@ def test_downloads_every_video_and_subtitle(tmp_path, dl):
     r = download_course(FakeProvider(_course()), "c", tmp_path, "720", dl)
     assert r.status == "complete"
     assert r.downloaded == 2
-    files = sorted(p.name for p in (tmp_path / "A - C" / "01 - Basics").iterdir())
+    files = sorted(p.name for p in (tmp_path / "C" / "01 - Basics").iterdir())
     assert files == ["01 - V1.mp4", "01 - V1.srt", "02 - V2.mp4", "02 - V2.srt"]
 
 
 def test_downloads_exercise_files(tmp_path, dl):
     download_course(FakeProvider(_course()), "c", tmp_path, "720", dl)
-    assert (tmp_path / "A - C" / "Exercise Files" / "x.zip").exists()
+    assert (tmp_path / "C" / "Exercise Files" / "x.zip").exists()
 
 
 def test_skips_existing_files(tmp_path, dl):
@@ -94,7 +94,7 @@ def test_rate_limited_video_does_not_abort_the_course(tmp_path, dl):
     r = download_course(p, "c", tmp_path, "720", boom)
     assert r.status == "partial"
     assert r.failed == ["v1"]
-    assert (tmp_path / "A - C" / "01 - Basics" / "02 - V2.mp4").exists()
+    assert (tmp_path / "C" / "01 - Basics" / "02 - V2.mp4").exists()
 
 
 def test_failing_exercise_file_does_not_abort_the_course(tmp_path, dl):
@@ -153,7 +153,7 @@ def test_video_missing_its_mp4_is_still_downloaded(tmp_path, dl):
     # The relaxed predicate must not skip a video whose .mp4 is genuinely absent.
     p = NoTranscriptProvider(_course())
     download_course(p, "c", tmp_path, "720", dl)
-    (tmp_path / "A - C" / "01 - Basics" / "02 - V2.mp4").unlink()
+    (tmp_path / "C" / "01 - Basics" / "02 - V2.mp4").unlink()
     before = len(dl.calls)
     download_course(p, "c", tmp_path, "720", dl)
     assert len(dl.calls) == before + 1
@@ -213,6 +213,6 @@ def test_no_srt_is_written_when_a_video_has_no_transcript(tmp_path, dl):
     # source may be WebVTT rather than an in-payload transcript. Either way, a video
     # with no transcript must produce a .mp4 and no empty or fabricated .srt.
     r = download_course(NoTranscriptProvider(_course()), "c", tmp_path, "720", dl)
-    names = sorted(p.name for p in (tmp_path / "A - C" / "01 - Basics").iterdir())
+    names = sorted(p.name for p in (tmp_path / "C" / "01 - Basics").iterdir())
     assert r.status == "complete"
     assert names == ["01 - V1.mp4", "02 - V2.mp4"]

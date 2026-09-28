@@ -255,7 +255,7 @@ wheels = [
 ]
 
 [[package]]
-name = "linkedin-course-downloader"
+name = "linkedin-downloader"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
@@ -266,6 +266,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "pycrucible" },
     { name = "pytest" },
 ]
 
@@ -277,7 +278,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest" }]
+dev = [
+    { name = "pycrucible", specifier = ">=0.4.8" },
+    { name = "pytest" },
+]
 
 [[package]]
 name = "lxml"
@@ -516,6 +520,17 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/1b/7d/92392ff7815c21062bea51aa7b87d45576f649f16458d78b7cf94b9ab2e6/pycparser-3.0.tar.gz", hash = "sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29", size = 103492, upload-time = "2026-01-21T14:26:51.89Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl", hash = "sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992", size = 48172, upload-time = "2026-01-21T14:26:50.693Z" },
+]
+
+[[package]]
+name = "pycrucible"
+version = "0.4.8"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/14/a7/8c293bba9af405c0806fc2111e4595f0fd5c9e6bb21eaed8294318d95097/pycrucible-0.4.8-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:d7a53c9c108b1001561ce575b3b9012f2c52a30d2df84979064b4d3eb426d9b7", size = 4614504, upload-time = "2026-08-29T23:12:15.567Z" },
+    { url = "https://files.pythonhosted.org/packages/63/04/fb1d516f224cc8d4eee02ebce0e3be49e2cce417b84d88682c878f73215c/pycrucible-0.4.8-py3-none-macosx_11_0_arm64.whl", hash = "sha256:4fb2cb49301d447f8525ff71a3a03c60248bcf5b594561774f6d4cb216efac6f", size = 4324562, upload-time = "2026-08-29T23:12:17.861Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/3d/b24b1471ed15a8ab9f8abb60ea339a57de6287d0ea1d3ec67ed635e1c23c/pycrucible-0.4.8-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:e72715493c68913d4d1a789cd62fb87f8399ef3f722893de163f004a0b28d67d", size = 4923897, upload-time = "2026-08-29T23:12:19.537Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/4e/11651551474cb9a5a235bdc43391b113465cf9836fda1e558e0a3cb6d731/pycrucible-0.4.8-py3-none-win_amd64.whl", hash = "sha256:23725d7a134b9046055078d3a31d68d8de0d56fefb741c24774a67a7302fb6ad", size = 4215933, upload-time = "2026-08-29T23:12:21.425Z" },
 ]
 
 [[package]]

@@ -12,6 +12,16 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _load(name):
+    # The recipe payloads these tests read are captures of a signed-in
+    # LinkedIn session and are deliberately not committed, so a fresh clone
+    # has no tests/fixtures/. Skipping here rather than at module scope
+    # keeps the five tests that build their payloads inline running.
+    if not FIXTURES.is_dir():
+        pytest.skip(
+            f"tests/{FIXTURES.name}/ is absent — recipe payloads captured "
+            "from a signed-in LinkedIn session are not committed. Add your "
+            "own captures to run these."
+        )
     return json.loads((FIXTURES / name).read_text())
 
 

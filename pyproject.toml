@@ -1,5 +1,5 @@
 [project]
-name = "linkedin-course-downloader"
+name = "linkedin-downloader"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
@@ -11,8 +11,39 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest",
+    "pycrucible>=0.4.8",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+# Single-executable build:
+# uv run pycrucible -e . -o ./linkedin
+[tool.pycrucible]
+entrypoint = "main.py"
+
+[tool.pycrucible.options]
+debug = false
+extract_to_temp = true
+delete_after_run = false
+
+[tool.pycrucible.patterns]
+include = [
+    "**/*.py",
+]
+exclude = [
+    ".venv/**/*",
+    ".browser-profile/**/*",
+    ".env",
+    "pycrucible_payload/**/*",
+    "downloads/**/*",
+    "tests/**/*",
+    "docs/**/*",
+    ".superpowers/**/*",
+    "**/__pycache__/**",
+    ".git/**/*",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/*.pyd",
+]

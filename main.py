@@ -25,6 +25,7 @@ import argparse
 import logging
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -113,7 +114,7 @@ def make_downloader(session: Any):
 def build_parser() -> argparse.ArgumentParser:
     """The CLI grammar from spec section 9: ``login``, ``download``, ``status``."""
     parser = argparse.ArgumentParser(
-        prog="downloader.py",
+        prog="linkedin-downloader",
         description="Download LinkedIn Learning courses this account is entitled to.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
@@ -129,7 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
     shared.add_argument(
         "--headless",
         action="store_true",
-        help="Hide the browser window; less reliable, and `login` needs a visible one",
+        help="Hide the browser window. It is already hidden by default, and "
+             "`login` always opens a visible one so you can type your password",
     )
     shared.add_argument(
         "--timeout",
@@ -296,9 +298,24 @@ def _report_missing_form(browser: LinkedInBrowser, captured: list[str]) -> None:
     print(captured[0], file=sys.stderr)
 
 
+def login_settings(settings: Settings) -> Settings:
+    """The settings ``login`` runs with: always a visible browser window.
+
+    ``login`` is the one command a human has to touch — the password and
+    any 2FA or CAPTCHA are typed into the Chrome window by hand, never by
+    this tool. :class:`~li.config.Settings` defaults ``headless`` to
+    ``True`` (right for ``download`` and ``status``, which nobody watches),
+    and ``login`` exposes no flag to turn it off, so passing those settings
+    straight through would open the prompt where nobody can see it and
+    block until interrupted. Forcing it here keeps the default honest for
+    the other two commands instead of special-casing them.
+    """
+    return replace(settings, headless=False)
+
+
 def _run_login(settings: Settings) -> int:
     """Interactive sign-in plus one probe; downloads nothing (spec 5.2)."""
-    with _open_browser(settings) as browser:
+    with _open_browser(login_settings(settings)) as browser:
         if browser.has_auth():
             # A profile that already holds li_at never fetches the form at
             # all. Say that plainly rather than leaving the user to wonder

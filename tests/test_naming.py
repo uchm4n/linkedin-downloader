@@ -28,12 +28,18 @@ def test_clean_dir_name_never_returns_empty_for_bad_only_title():
     assert clean_dir_name(":/:*?") == FALLBACK_DIR_NAME
 
 
-def test_course_dir_uses_author_and_cleaned_title(tmp_path):
-    assert course_dir(_course(), tmp_path).name == "Erich Gamma - Design Patterns"
+def test_course_dir_uses_cleaned_title_only(tmp_path):
+    assert course_dir(_course(), tmp_path).name == "Design Patterns"
 
 
 def test_course_dir_falls_back_when_title_sanitises_to_empty(tmp_path):
-    assert course_dir(_course(name=":/:*?"), tmp_path).name == f"Erich Gamma - {FALLBACK_DIR_NAME}"
+    assert course_dir(_course(name=":/:*?"), tmp_path).name == FALLBACK_DIR_NAME
+
+
+def test_course_dir_ignores_a_missing_author(tmp_path):
+    # A course with no listed author joins to "", which used to leave a
+    # leading " - " on the directory name.
+    assert course_dir(_course(author=""), tmp_path).name == "Design Patterns"
 
 
 def test_chapter_dir_zero_pads_index(tmp_path):
@@ -44,6 +50,13 @@ def test_chapter_dir_zero_pads_index(tmp_path):
 def test_chapter_dir_names_empty_chapter_welcome(tmp_path):
     ch = Chapter(name="", videos=[], index=1)
     assert chapter_dir(_course(), ch, tmp_path).name == "01 - Welcome"
+
+
+def test_chapter_dir_nests_under_the_title_only_course_dir(tmp_path):
+    # Guards the shape end to end, not just the leaf: the course directory
+    # itself must drop the author, and chapters must sit inside it.
+    ch = Chapter(name="Basics", videos=[], index=1)
+    assert chapter_dir(_course(), ch, tmp_path) == tmp_path / "Design Patterns" / "01 - Basics"
 
 
 def test_video_and_subtitle_filenames_share_a_stem():
