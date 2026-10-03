@@ -155,6 +155,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="One slug or URL per line; # comments and blanks are dropped",
     )
+    course_source.add_argument(
+        "--output-dir",
+        default=None,
+        metavar="PATH",
+        help="Where to write downloads (default: ./downloads)",
+    )
 
     commands.add_parser(
         "login",

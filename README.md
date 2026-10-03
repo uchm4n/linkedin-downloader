@@ -29,12 +29,13 @@ chmod +x linkedin
 
 ## ⚙️ Configuration
 
-Create a file called `.env` next to the binary:
+Create a file called `.env` **in the directory you run the tool from**:
 
 ```bash
 LINKEDIN_EMAIL=you@example.com
 LINKEDIN_PASSWORD=
 COURSES=https://www.linkedin.com/learning/course1,https://www.linkedin.com/learning/course2
+DOWNLOADS_DIR=
 ```
 
 | Variable | What it does |
@@ -42,8 +43,7 @@ COURSES=https://www.linkedin.com/learning/course1,https://www.linkedin.com/learn
 | `LINKEDIN_EMAIL` | Prefills the email field of the login form. That is all it does. |
 | `LINKEDIN_PASSWORD` | Leave it empty. The tool never reads or types your password — there is no reason to put it here. |
 | `COURSES` | Optional. Comma-separated courses, used when you pass no slug on the command line. |
-
-`.env` sits next to your downloaded videos. Don't commit or share it.
+| `DOWNLOADS_DIR` | Optional. Where videos go. Overridden by `--output-dir`. |
 
 2FA and CAPTCHA need no special handling: login happens in a real Chrome window,
 so you clear any challenge yourself.
@@ -65,8 +65,8 @@ the session to become valid, then proves it by reading one course:
 Login OK: this profile can read courses (probe: python-essential-training).
 ```
 
-The session is saved in `.browser-profile/` next to the binary, so this is a
-one-time event until the cookie expires.
+The session is saved in `.browser-profile/` in your current directory, so this
+is a one-time event until the cookie expires.
 
 **Never** run two commands at the same time — the same profile lock applies to
 `download` and `status`.
@@ -75,6 +75,8 @@ one-time event until the cookie expires.
 
 ```bash
 ./linkedin download <slug>
+# or
+./linkedin download <slug> --output-dir <path>
 ```
 
 Re-running the same command resumes where the last run stopped, so it is always
@@ -103,7 +105,8 @@ Already have a list? Point at it instead:
 | --- | --- | --- |
 | `--resolution {360,540,720,1080}` | `download` | Video quality to request (default `720`; only `720` verified live) |
 | `--from-file PATH` | `download`, `status` | One slug or URL per line; `#` comments and blank lines are dropped |
-| `--profile-dir PATH` | all | Persistent Chrome profile (default `.browser-profile`) |
+| `--output-dir PATH` | `download`, `status` | Where to write downloads (default `./downloads`) |
+| `--profile-dir PATH` | all | Persistent Chrome profile (default `./.browser-profile`) |
 | `--timeout SECONDS` | all | Per-request timeout (default 60) |
 | `--headless` | all | Hide the browser window. Already the default — and `login` always opens a visible one so you can type your password |
 

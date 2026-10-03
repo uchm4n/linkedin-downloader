@@ -1,6 +1,7 @@
 """Environment loading, settings assembly, and course slug resolution."""
 
 import argparse
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,15 @@ class Settings:
     resolution: str = "720"
     timeout: int = 60
     output_root: Path = Path("downloads")
+
+
+def _expand(value: str | Path) -> Path:
+    """``~`` and ``$VARS`` in a user-supplied path, without touching ``.``.
+
+    A leading ``./`` is left alone, so a relative path stays relative to the
+    caller's shell the way any other command line behaves.
+    """
+    return Path(os.path.expandvars(str(value))).expanduser()
 
 
 def load_env(dotenv_path: Path | None = None) -> None:
@@ -108,13 +118,14 @@ def build_settings(args: argparse.Namespace, env: Mapping[str, str]) -> Settings
         "courses": courses,
     }
     if (value := getattr(args, "profile_dir", None)):
-        overrides["profile_dir"] = Path(value)
+        overrides["profile_dir"] = _expand(value)
     if getattr(args, "headless", False):
         overrides["headless"] = True
     if (value := getattr(args, "resolution", None)):
         overrides["resolution"] = str(value)
     if (value := getattr(args, "timeout", None)):
         overrides["timeout"] = int(value)
-    if (value := getattr(args, "output_root", None)):
-        overrides["output_root"] = Path(value)
+    output_dir = getattr(args, "output_dir", None) or env.get("DOWNLOADS_DIR")
+    if output_dir:
+        overrides["output_root"] = _expand(output_dir)
     return Settings(**overrides)

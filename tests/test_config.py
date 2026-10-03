@@ -1,6 +1,43 @@
+from pathlib import Path
+
 import pytest
 
-from li.config import resolve_slugs, slug_from
+from main import build_parser
+from li.config import (Settings, build_settings, resolve_slugs, slug_from)
+
+
+def test_output_root_defaults_to_downloads_in_the_working_directory():
+    assert Settings(email="", courses=[]).output_root == Path("downloads")
+
+
+def test_output_dir_expands_a_home_relative_path(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/tester")
+    args = build_parser().parse_args(["download", "a", "--output-dir", "~/videos/li"])
+    assert build_settings(args, {}).output_root == Path("/home/tester/videos/li")
+
+
+def test_output_dir_leaves_a_relative_path_relative():
+    args = build_parser().parse_args(["download", "a", "--output-dir", "./somewhere"])
+    assert build_settings(args, {}).output_root == Path("./somewhere")
+
+
+def test_output_dir_flag_beats_the_env_var(tmp_path):
+    args = build_parser().parse_args(
+        ["download", "a", "--output-dir", str(tmp_path / "flagged")])
+    settings = build_settings(args, {"DOWNLOADS_DIR": str(tmp_path / "fromenv")})
+    assert settings.output_root == tmp_path / "flagged"
+
+
+def test_downloads_dir_env_var_is_used_when_no_flag(tmp_path):
+    args = build_parser().parse_args(["download", "a"])
+    settings = build_settings(args, {"DOWNLOADS_DIR": str(tmp_path / "fromenv")})
+    assert settings.output_root == tmp_path / "fromenv"
+
+
+def test_status_also_accepts_an_output_dir(tmp_path):
+    args = build_parser().parse_args(["status", "a", "--output-dir", str(tmp_path)])
+    settings = build_settings(args, {})
+    assert settings.output_root == tmp_path
 
 
 @pytest.mark.parametrize("value,expected", [
