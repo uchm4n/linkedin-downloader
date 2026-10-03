@@ -24,7 +24,7 @@ A course with exercise files also gets an `Exercise Files/` folder
 
 ## ⚙️ Install
 
-Grab the single executable, put it wherever you like, and make it runnable:
+Download the [linkedin](https://github.com/uchm4n/linkedin-downloader/blob/main/linkedin), save it wherever you like, then make it executable:
 
 ```bash
 chmod +x linkedin
