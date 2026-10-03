@@ -2,9 +2,6 @@
 
 > Downloads LinkedIn Learning courses as video, subtitles and exercise files.
 
-Keep the courses your account is entitled to as real files on your own disk.
-
-
 ## 🎬 What you get
 
 A course with exercise files also gets an `Exercise Files/` folder
