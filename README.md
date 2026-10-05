@@ -2,6 +2,8 @@
 
 > Downloads LinkedIn Learning courses as video, subtitles and exercise files.
 
+<image src="./screenshot.png" alt="LinkedIn Downloader Screenshot" />
+
 ## 🎬 What you get
 
 A course with exercise files also gets an `Exercise Files/` folder
