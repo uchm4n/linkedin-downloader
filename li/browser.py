@@ -27,13 +27,40 @@ from typing import Any
 
 from scrapling.fetchers import StealthySession
 
-from li.errors import AuthRequired, BrowserFetchFailed, CourseUnavailable
+from li.errors import (AuthRequired, BrowserFetchFailed, CourseUnavailable,
+                       RenderTimeout)
 from li.mapping import find_recipe_blocks, iter_entities
 
 logger = logging.getLogger(__name__)
 
 LOGIN_URL = "https://www.linkedin.com/uas/login"
 LI_AT = "li_at"
+
+#: How long one page load may take to render its recipe block before the
+#: attempt is abandoned and the page re-navigated. The recipe blocks are
+#: server-rendered, so this only has to cover hydration and script
+#: execution on a loaded page -- seconds, not minutes.
+RENDER_TIMEOUT_S = 10
+
+#: Gap between the wait's polls of the live DOM.
+RENDER_POLL_S = 0.25
+
+#: Total attempts per page load, including the first. Three is the point
+#: where a genuinely slow render is very likely to have landed and a broken
+#: page is very unlikely to recover: at :data:`RENDER_TIMEOUT_S` a stuck page
+#: costs ~35s before it is reported, which stays tolerable across a
+#: 600-video course.
+RENDER_ATTEMPTS = 3
+
+#: Sleep between attempts: 1s, then 2s. Applied only *between* attempts, so
+#: a page that succeeds first time pays nothing.
+RETRY_BACKOFF_S = (1, 2)
+
+#: The recipe blocks are hidden ``<code>`` elements; this selects them all.
+#: Used only to enumerate candidates -- whether one of them carries the
+#: wanted ``$type`` is decided in Python by :func:`li.mapping.iter_entities`,
+#: so the selector never has to guess which block is the real one.
+RECIPE_SELECTOR = 'code[id^="bpr-guid-"]'
 
 #: The login form's email inputs. The page can render more than one
 #: matching input (hidden autofill copies included), which is why
@@ -104,6 +131,76 @@ def select_recipe(blocks: list[dict], type_suffix: str) -> dict:
         if next(iter_entities(block, type_suffix), None) is not None:
             return block
     raise BrowserFetchFailed(f"the page rendered no {type_suffix} recipe block")
+
+
+#: Reads each candidate recipe block's decoded text out of the live DOM.
+#: ``textContent`` rather than ``innerHTML`` because the bodies are
+#: HTML-escaped JSON: as text they are already decoded, which is the form
+#: :func:`li.mapping.find_recipe_blocks` parses directly.
+_RECIPE_BODIES_JS = "els => els.map(el => el.textContent)"
+
+
+def wait_for_recipe(
+    page: Any,
+    type_suffix: str,
+    *,
+    timeout_s: float | None = None,
+    poll_s: float = RENDER_POLL_S,
+) -> bool:
+    """Delay until ``page``'s DOM holds a ``type_suffix`` recipe block.
+
+    Returns ``True`` if the block appeared, ``False`` if the deadline passed
+    first. Deliberately does **not** raise and does not classify the page: a
+    denial page also never renders a recipe block, and only
+    :meth:`LinkedInBrowser._select` can tell those two apart (denial first,
+    then a missing block). Raising here would turn every denied course into
+    a render timeout.
+
+    ``timeout_s`` defaults to :data:`RENDER_TIMEOUT_S` read at call time, not
+    at import time, so the deadline stays adjustable in one place.
+
+    **Why a poll and not ``wait_selector``.** Scrapling can wait for a CSS
+    selector to appear, but on a *video* page that selector is already
+    satisfied: the course block renders before the video block, so
+    ``code[id^='bpr-guid-']`` matches instantly and the fetch goes on to
+    return precisely the unrendered page this function exists to catch. The
+    condition has to be the *typed* block, which is what this checks.
+
+    ``page`` is duck-typed (anything with ``eval_on_selector_all``) so this
+    loop is unit testable without a browser.
+    """
+    deadline = time.monotonic() + (RENDER_TIMEOUT_S if timeout_s is None else timeout_s)
+    while True:
+        bodies = page.eval_on_selector_all(RECIPE_SELECTOR, _RECIPE_BODIES_JS)
+        if _blocks_are_ready(bodies, type_suffix):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_s)
+
+
+def _blocks_are_ready(bodies: Any, type_suffix: str) -> bool:
+    """True when one polled block body carries a ``type_suffix`` entity.
+
+    The bodies are re-wrapped as ``<code id="bpr-guid-N">`` elements so the
+    mapper's existing recipe regex applies unchanged -- one parser, rather
+    than a second interpretation of the same blocks that could drift.
+
+    ``next(iter_entities(...), None)`` rather than ``any(iter_entities(...))``:
+    the generator object itself is always truthy, so ``any`` over it answers
+    "yes" for any block at all and the type check would be decorative.
+    """
+    if not isinstance(bodies, (list, tuple)):
+        return False
+    html = "".join(
+        f'<code id="bpr-guid-{index}">{body}</code>'
+        for index, body in enumerate(bodies)
+        if isinstance(body, str)
+    )
+    return any(
+        next(iter_entities(block, type_suffix), None) is not None
+        for block in find_recipe_blocks(html)
+    )
 
 
 class LinkedInBrowser:
@@ -185,7 +282,8 @@ class LinkedInBrowser:
                 return False
             time.sleep(1)
 
-    def fetch_html(self, url: str, *, disable_resources: bool = False) -> str:
+    def fetch_html(self, url: str, *, disable_resources: bool = False,
+                   wait_for: str | None = None) -> str:
         """Navigate to ``url`` and return the page's HTML.
 
         Sets no ``User-Agent``: Scrapling's ``stealthy_headers`` build
@@ -193,8 +291,30 @@ class LinkedInBrowser:
         overriding them defeats that. Passes no ``capture_xhr`` either —
         a probe capturing XHR matched zero responses, because the recipe
         blocks are server-rendered into the HTML.
+
+        ``wait_for`` names the entity type whose recipe block must render
+        before the HTML is read (see :func:`wait_for_recipe` for why this
+        cannot be a plain selector wait). It is wired in as a
+        ``page_action`` because that is the only hook that runs *before*
+        Scrapling captures the DOM.
         """
-        return self._fetch(url, disable_resources=disable_resources)
+        out: dict[str, Any] = {}
+        page_action = _await_recipe(wait_for, out) if wait_for else None
+        html = self._fetch(url, disable_resources=disable_resources,
+                           page_action=page_action)
+        if "error" in out:
+            # The wait itself broke (a Playwright-level failure, not a
+            # timeout). Surfaced here because scrapling would otherwise
+            # swallow it and hand back HTML the wait never approved.
+            raise BrowserFetchFailed(f"recipe wait failed for {url}: {out['error']}")
+        if out.get("rendered") is False:
+            # The deadline passed with no typed block. Not raised here: a
+            # denial page looks exactly like this, and _select's denial check
+            # must get to run first. It reports the denial if that is what
+            # this is, and _load re-navigates otherwise.
+            logger.info("no %s recipe block rendered for %s within %ss",
+                        wait_for, url, RENDER_TIMEOUT_S)
+        return html
 
     def login(self, interactive: bool = True) -> bool:
         """Open the login form and prefill ONLY the email field.
@@ -229,8 +349,8 @@ class LinkedInBrowser:
         Course pages play no video, so resources are dropped for speed.
         """
         self._require_auth()
-        html = self.fetch_html(COURSE_URL.format(slug=slug), disable_resources=True)
-        return self._select(html, "Course", slug)
+        return self._load(COURSE_URL.format(slug=slug), "Course", slug,
+                          disable_resources=True)
 
     def load_video(self, course_slug: str, video_slug: str) -> dict:
         """Fresh recipe payload for one video page.
@@ -242,9 +362,8 @@ class LinkedInBrowser:
         expire about 54 minutes after issue.
         """
         self._require_auth()
-        html = self.fetch_html(video_page_url(course_slug, video_slug),
-                               disable_resources=False)
-        return self._select(html, "Video", video_slug)
+        return self._load(video_page_url(course_slug, video_slug), "Video",
+                          video_slug, disable_resources=False)
 
     def probe(self, slug: str) -> bool:
         """Is this session able to read a course? (spec section 5.2 step 5)
@@ -264,6 +383,43 @@ class LinkedInBrowser:
         except BrowserFetchFailed:
             return False
         return next(iter_entities(payload, "Course"), None) is not None
+
+    def _load(self, url: str, type_suffix: str, slug: str, *,
+              disable_resources: bool) -> dict:
+        """Fetch ``url`` until it renders a ``type_suffix`` recipe block.
+
+        The retry wraps the fetch *and* the parse, and that placement is the
+        point. Scrapling's own ``retries`` re-runs only when ``fetch()``
+        raises, so it cannot help here: a page that answers 200 with an
+        unrendered shell is a *successful* fetch, and the miss is only
+        observable after parsing. Each attempt therefore re-navigates to get
+        genuinely new HTML instead of re-parsing the same bytes.
+
+        ``AuthRequired`` and ``CourseUnavailable`` propagate on the first
+        attempt: a logged-out profile and a denial page are answers, not
+        hiccups, and retrying either only delays the correct verdict. Every
+        other typed failure is retried up to :data:`RENDER_ATTEMPTS` and then
+        reported as :class:`~li.errors.RenderTimeout`.
+        """
+        last: BrowserFetchFailed | None = None
+        for attempt in range(RENDER_ATTEMPTS):
+            if attempt:
+                time.sleep(RETRY_BACKOFF_S[min(attempt - 1, len(RETRY_BACKOFF_S) - 1)])
+            try:
+                html = self.fetch_html(url, disable_resources=disable_resources,
+                                       wait_for=type_suffix)
+                return self._select(html, type_suffix, slug)
+            except (AuthRequired, CourseUnavailable):
+                raise
+            except BrowserFetchFailed as exc:
+                last = exc
+                logger.warning(
+                    "%s: attempt %d/%d did not render a %s recipe block (%s)",
+                    slug, attempt + 1, RENDER_ATTEMPTS, type_suffix, exc,
+                )
+        raise RenderTimeout(
+            f"{slug}: no {type_suffix} recipe block after {RENDER_ATTEMPTS} attempts"
+        ) from last
 
     def _select(self, html: str, type_suffix: str, slug: str) -> dict:
         """Denial check first, then parse and pick the typed recipe block."""
@@ -304,6 +460,27 @@ class LinkedInBrowser:
         # str(): html_content is a TextHandler, a str subclass; the
         # mapper must see a plain string.
         return str(response.html_content)
+
+
+def _await_recipe(type_suffix: str, out: dict[str, Any]) -> Callable:
+    """Build the ``page_action`` that waits for a typed recipe block.
+
+    Scrapling wraps every ``page_action`` in ``except Exception:
+    log.error(...)`` (``engines/_browsers/_stealth.py``), so anything raised
+    in here is swallowed into a silent, successful-looking result. Nothing
+    here raises, and the wait's ``False`` is recorded on ``out`` rather than
+    acted on: only :meth:`LinkedInBrowser._select` can tell a denial page
+    from a merely unrendered one, so the verdict is left to the parse.
+    """
+
+    def action(page: Any) -> None:
+        try:
+            out["rendered"] = wait_for_recipe(page, type_suffix)
+        except Exception as exc:  # never raise: scrapling would swallow it
+            out["error"] = exc
+            logger.debug("Recipe wait for %s failed: %s", type_suffix, exc)
+
+    return action
 
 
 def _prefill_email(email: str, out: dict[str, Any]) -> Callable:

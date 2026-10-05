@@ -26,15 +26,19 @@ retries once; a second failure is genuinely broken and is reported.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from li.errors import CourseUnavailable, DownloadFailed, LiError, RateLimited, VideoLocked
+from li.errors import (AuthRequired, CourseUnavailable, DownloadFailed, LiError,
+                       RateLimited, VideoLocked)
 from li.models import CourseResult, Video, VideoPayload
 from li.naming import chapter_dir, course_dir, subtitle_filename, video_filename
 from li.providers import CourseProvider
 from li.storage import ensure_dir
 from li.subtitles import write_srt
+
+logger = logging.getLogger(__name__)
 
 # Exercise files live under the course directory: <course dir>/Exercise Files/<name>.
 EXERCISE_DIR_NAME = "Exercise Files"
@@ -93,7 +97,19 @@ def _process_video(
     while True:
         try:
             payload: VideoPayload = provider.get_video(course_slug, video.slug, resolution)
-        except (VideoLocked, RateLimited, DownloadFailed):
+        except AuthRequired:
+            # The one typed failure that must NOT be absorbed per video: the
+            # session has no li_at, so every remaining video would cost a page
+            # load and report the same verdict. One AuthRequired ends the run
+            # and reaches the CLI, which prints the `login` instruction.
+            raise
+        except LiError as exc:
+            # Every other typed failure is this video's problem alone.
+            # BrowserFetchFailed belongs here: it is what select_recipe raises
+            # when a page renders no recipe block, and it used to escape this
+            # function entirely, abandoning every video after it. MalformedPayload
+            # and CourseUnavailable reach here the same way.
+            logger.warning("%s/%s: %s", course_slug, video.slug, exc)
             return "failed"
 
         if mp4_path.exists() and not payload.transcript:
@@ -139,9 +155,13 @@ def download_course(
     except CourseUnavailable:
         # Before any ensure_dir: an inaccessible course must litter nothing.
         return CourseResult(slug=slug, downloaded=0, skipped=0, failed=[], status="unavailable")
-    except LiError:
+    except LiError as exc:
         # Any other typed failure means the course itself could not be read.
-        return CourseResult(slug=slug, downloaded=0, skipped=0, failed=[slug], status="failed")
+        # ``reason`` is the whole point: without it the CLI has nothing to print
+        # but "unknown error", which is how an unrendered page and a dropped
+        # connection ended up indistinguishable in the run summary.
+        return CourseResult(slug=slug, downloaded=0, skipped=0, failed=[slug],
+                            status="failed", reason=str(exc))
 
     # naming.chapter_dir resolves course_dir itself, so both it and course_dir
     # take the OUTPUT ROOT; feeding it the course directory would nest the

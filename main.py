@@ -434,9 +434,15 @@ def _run_status(settings: Settings, courses: list[str]) -> int:
 
 
 def _print_result(result: CourseResult, reason: str | None = None) -> None:
-    """One summary line for one course, straight from its ``CourseResult``."""
+    """One summary line for one course, straight from its ``CourseResult``.
+
+    ``reason`` (the argument) is the message from an error that *escaped*
+    ``download_course``; ``result.reason`` is the one the course itself
+    recorded for a failure it handled. Both are consulted so a failure is
+    never summarised as "unknown error" when a message was available.
+    """
     if result.status == "failed":
-        print(f"{result.slug}: failed — {reason or 'unknown error'}")
+        print(f"{result.slug}: failed — {reason or result.reason or 'unknown error'}")
     elif result.status == "unavailable":
         print(f"{result.slug}: unavailable")
     else:

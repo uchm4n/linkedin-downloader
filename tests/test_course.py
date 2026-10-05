@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from li.course import download_course
-from li.errors import (BrowserFetchFailed, CourseUnavailable, DownloadFailed,
-                      RateLimited, VideoLocked)
+from li.errors import (AuthRequired, BrowserFetchFailed, CourseUnavailable,
+                      DownloadFailed, RateLimited, VideoLocked)
 from li.models import Chapter, Course, ExerciseFile, Video, VideoPayload
 
 
@@ -172,6 +172,56 @@ def test_a_course_whose_read_fails_reports_failed_status(tmp_path, dl):
     r = download_course(BrokenProvider(), "c", tmp_path, "720", dl)
     assert r.status == "failed"
     assert r.failed == ["c"]
+
+
+def test_unrendered_video_page_does_not_abort_the_rest_of_the_course(tmp_path, dl):
+    # The bug this pins: select_recipe raises BrowserFetchFailed when the page
+    # renders no Video recipe block, and _process_video caught only
+    # (VideoLocked, RateLimited, DownloadFailed). The error escaped the video
+    # loop, escaped download_course, and reached the CLI's per-course handler,
+    # abandoning every video AFTER the bad one. Reproduced before the fix: v1
+    # downloaded, then download_course raised and v3 was never attempted.
+    class UnrenderedProvider(FakeProvider):
+        def get_video(self, course_slug, video_slug, resolution):
+            if video_slug == "v2":
+                raise BrowserFetchFailed("the page rendered no Video recipe block")
+            return super().get_video(course_slug, video_slug, resolution)
+
+    r = download_course(UnrenderedProvider(_course(n_videos=3)), "c", tmp_path, "720", dl)
+    assert r.status == "partial", "one unrendered page must not kill the course"
+    assert r.failed == ["v2"]
+    assert (tmp_path / "C" / "01 - Basics" / "03 - V3.mp4").exists(), \
+        "the video after the bad one must still be downloaded"
+
+
+def test_auth_required_still_ends_the_run(tmp_path, dl):
+    # The deliberate exception to the widened catch: a profile that has lost
+    # li_at must stop immediately. Every remaining video would otherwise cost a
+    # page load and report AuthRequired as a per-video failure, burying the one
+    # message that tells the user to run `login`.
+    class LoggedOutProvider(FakeProvider):
+        def get_video(self, course_slug, video_slug, resolution):
+            raise AuthRequired("Browser profile is not authenticated")
+
+    with pytest.raises(AuthRequired):
+        download_course(LoggedOutProvider(_course()), "c", tmp_path, "720", dl)
+
+
+def test_course_level_failure_keeps_its_reason(tmp_path, dl):
+    # main.py printed "unknown error" because download_course returned a failed
+    # CourseResult carrying no reason, and the CLI appends (result, None) for a
+    # returned result. The actual message was discarded, so a genuine render
+    # failure was indistinguishable from any other.
+    class BrokenProvider:
+        def get_course(self, slug):
+            raise BrowserFetchFailed("the page rendered no Course recipe block")
+
+        def get_video(self, *a):
+            raise AssertionError("must not be called")
+
+    r = download_course(BrokenProvider(), "c", tmp_path, "720", dl)
+    assert r.status == "failed"
+    assert r.reason == "the page rendered no Course recipe block"
 
 
 def test_expired_stream_url_triggers_one_refetch_not_a_locked_report(tmp_path, dl):

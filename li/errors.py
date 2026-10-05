@@ -21,6 +21,17 @@ class BrowserFetchFailed(LiError):
     """Raised when the browser path fails to capture a page's data."""
 
 
+class RenderTimeout(BrowserFetchFailed):
+    """Raised when a page never rendered the recipe block being waited for.
+
+    A ``BrowserFetchFailed`` subclass on purpose. The page loaded and answered
+    200 -- it simply had not finished rendering -- and the call sites already
+    treat a fetch failure as a recoverable, per-item problem. A sibling class
+    would slip past every one of those ``except`` clauses and re-create the
+    bug this type was added to fix: one slow page aborting a whole course.
+    """
+
+
 class CourseUnavailable(LiError):
     """Raised when a course does not exist or the account cannot access it.
 

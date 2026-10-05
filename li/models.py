@@ -57,6 +57,13 @@ class CourseResult:
 
     ``status`` is one of ``"complete"``, ``"partial"``, ``"unavailable"``
     or ``"failed"``.
+
+    ``reason`` carries the message behind a ``"failed"`` status. It exists
+    because the summary previously fell back to the literal "unknown error":
+    a course whose page rendered no recipe block reported exactly the same
+    line as any other read failure, so the one diagnostic that identified
+    the problem was discarded before printing. Populated only on
+    ``"failed"``; ``None`` everywhere else.
     """
 
     slug: str
@@ -64,3 +71,4 @@ class CourseResult:
     skipped: int
     failed: list[str]
     status: str
+    reason: str | None = None
