@@ -27,9 +27,11 @@ retries once; a second failure is genuinely broken and is reported.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from li.console import NullReporter, Reporter
 from li.errors import (AuthRequired, CourseUnavailable, DownloadFailed, LiError,
                        RateLimited, VideoLocked)
 from li.models import CourseResult, Video, VideoPayload
@@ -63,6 +65,7 @@ def _process_video(
     mp4_path: Path,
     srt_path: Path,
     downloader: Downloader,
+    reporter: Reporter,
 ) -> VideoOutcome:
     """Resolve one video to a downloaded, skipped or failed outcome.
 
@@ -87,21 +90,33 @@ def _process_video(
     the refetch exactly one -- a second failure returns ``"failed"`` instead
     of looping, so a broken video can never spin. ``VideoLocked`` and
     ``RateLimited`` are not URL expiry, so they report immediately.
+
+    Every exit path reports through ``reporter``, including the failure ones:
+    a video that ends in ``"failed"`` has to leave a red line behind, or the
+    user sees a run that silently stops mentioning it. The reported size is
+    the file that actually landed, measured from disk rather than taken from
+    a header.
     """
+    title = Path(video_filename(video)).stem
+    reporter.start(title)
+    started = time.monotonic()
+
     if mp4_path.exists() and srt_path.exists():
         # Both files present: the predicate's second disjunct is already
         # true, so there is nothing the payload could add -- no page load.
+        reporter.skip("already have it")
         return "skipped"
 
     refetched = False
     while True:
         try:
             payload: VideoPayload = provider.get_video(course_slug, video.slug, resolution)
-        except AuthRequired:
+        except AuthRequired as exc:
             # The one typed failure that must NOT be absorbed per video: the
             # session has no li_at, so every remaining video would cost a page
             # load and report the same verdict. One AuthRequired ends the run
             # and reaches the CLI, which prints the `login` instruction.
+            reporter.fail(str(exc))
             raise
         except LiError as exc:
             # Every other typed failure is this video's problem alone.
@@ -109,29 +124,37 @@ def _process_video(
             # when a page renders no recipe block, and it used to escape this
             # function entirely, abandoning every video after it. MalformedPayload
             # and CourseUnavailable reach here the same way.
-            logger.warning("%s/%s: %s", course_slug, video.slug, exc)
+            reporter.fail(str(exc))
             return "failed"
 
         if mp4_path.exists() and not payload.transcript:
             # mp4 done, no .srt ever expected: lookup was the price of
             # knowing that; the transfer stays skipped.
+            reporter.skip("already have it")
             return "skipped"
 
         try:
             downloader(payload.url, mp4_path, None)
-        except (VideoLocked, RateLimited):
+        except (VideoLocked, RateLimited) as exc:
             # Not URL expiry: a lock or a 429 is reported immediately.
+            reporter.fail(str(exc))
             return "failed"
-        except DownloadFailed:
+        except DownloadFailed as exc:
             if refetched:
+                reporter.fail(str(exc))
                 return "failed"
             refetched = True
+            # An expired signed URL is the one failure worth retrying, and it
+            # is worth saying so: the line stays open and the user sees why
+            # this video took twice as long as its neighbours.
+            reporter.note(f"retrying, {exc}")
             continue
 
         # No transcript means no SRT: captions may live in WebVTT this stage
         # does not fetch, and an empty or fabricated .srt is worse than none.
         if payload.transcript:
             write_srt(payload.transcript, payload.duration_s * 1000, srt_path)
+        reporter.done(mp4_path.stat().st_size, time.monotonic() - started)
         return "downloaded"
 
 
@@ -141,6 +164,7 @@ def download_course(
     output_root: Path,
     resolution: str,
     downloader: Downloader,
+    reporter: Reporter | None = None,
 ) -> CourseResult:
     """Download every video and exercise file of ``slug`` under ``output_root``.
 
@@ -149,7 +173,12 @@ def download_course(
     ``"unavailable"`` when ``CourseUnavailable`` said the course cannot be
     read (no directory is created on that path), or ``"failed"`` when the
     course metadata itself was unusable for any other typed reason.
+
+    ``reporter`` is optional and defaults to :class:`~li.console.NullReporter`,
+    so every caller that does not want a console -- which is all of the
+    tests -- keeps working unchanged and prints nothing.
     """
+    report: Reporter = reporter or NullReporter()
     try:
         course = provider.get_course(slug)
     except CourseUnavailable:
@@ -170,15 +199,17 @@ def download_course(
     downloaded = 0
     skipped = 0
     failed: list[str] = []
+    # Labelled once per course rather than repeated per video: a run over
+    # several courses scrolls a long column of titles, and without a heading
+    # there is no way to tell where one course ended and the next began.
+    report.course(course.name or slug)
 
     for chapter in course.chapters:
         chapter_path = ensure_dir(chapter_dir(course, chapter, output_root))
         for video in chapter.videos:
             mp4_path = chapter_path / video_filename(video)
             srt_path = chapter_path / subtitle_filename(video)
-            outcome = _process_video(
-                provider, slug, video, resolution, mp4_path, srt_path, downloader
-            )
+            outcome = _process_video(provider, slug, video, resolution, mp4_path, srt_path,downloader, report)
             if outcome == "downloaded":
                 downloaded += 1
             elif outcome == "skipped":
@@ -190,15 +221,20 @@ def download_course(
         exercise_dir = ensure_dir(course_path / EXERCISE_DIR_NAME)
         for exercise_file in course.exercise_files:
             dest = exercise_dir / exercise_file.name
+            report.start(exercise_file.name)
             if dest.exists():
                 # Resumed like a video, but not a video: it is not counted in
                 # ``skipped``, which counts videos only.
+                report.skip("already have it")
                 continue
+            started = time.monotonic()
             try:
                 downloader(exercise_file.url, dest, None)
-            except (VideoLocked, RateLimited, DownloadFailed):
-                # One bad file must not take the course down (Review Focus #5).
+            except (VideoLocked, RateLimited, DownloadFailed) as exc:
+                report.fail(str(exc))
                 failed.append(exercise_file.name)
+            else:
+                report.done(dest.stat().st_size, time.monotonic() - started)
 
     return CourseResult(
         slug=slug,

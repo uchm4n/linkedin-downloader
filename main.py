@@ -29,10 +29,12 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from rich.console import Console
 from scrapling.fetchers import FetcherSession
 
 from li.browser import AUTH_REQUIRED_MESSAGE, LOGIN_PROBE_SLUG, LinkedInBrowser
 from li.config import Settings, build_settings, load_env
+from li.console import build_reporter, configure_logging
 from li.course import download_course
 from li.errors import AuthRequired, LiError
 from li.models import Course, CourseResult
@@ -178,6 +180,21 @@ def build_parser() -> argparse.ArgumentParser:
         choices=RESOLUTIONS,
         default="720",
         help="Requested video tier (default: 720)",
+    )
+    # Output verbosity. --quiet hides the successes; --verbose puts the full
+    # log back (every page fetch, every retry, every mapping warning). They
+    # are mutually exclusive because they ask for opposite things, and a run
+    # honouring both would be in a state nobody asked for.
+    output = download.add_mutually_exclusive_group()
+    output.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Show only failures and the final summary",
+    )
+    output.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Restore full logging: every page fetch, retry and warning",
     )
 
     commands.add_parser(
@@ -351,47 +368,59 @@ def _run_login(settings: Settings) -> int:
     return 1
 
 
-def _run_download(settings: Settings, courses: list[str]) -> int:
+def _run_download(settings: Settings, courses: list[str], *, quiet: bool = False, verbose: bool = False) -> int:
     """Download every course in ``courses``, then print one line per course."""
     results: list[tuple[CourseResult, str | None]] = []
-    with _open_browser(settings) as browser:
-        if not _probe_logged_in(browser):
-            return 1
-        provider = build_stage1_provider(browser)
-        # ONE HTTP client for the whole run: the provider resolves a fresh
-        # signed CDN URL per video, and every one of them transfers through
-        # this session with the browser's cookies attached.
-        with FetcherSession(impersonate="chrome") as client:
-            session = _CookieSession(client, _cookie_values(browser.cookies()))
-            download = make_downloader(session)
-            for slug in courses:
-                # The try covers everything done for this course. One typed
-                # error anywhere in it costs one summary line; the next
-                # course still runs. An untyped error escaping here would be
-                # a traceback that aborts the run — the failure this project
-                # keeps eliminating — which is why li/errors.py exists.
-                try:
-                    result = download_course(
-                        provider,
-                        slug,
-                        settings.output_root,
-                        settings.resolution,
-                        download,
-                    )
-                    results.append((result, None))
-                except LiError as exc:
-                    results.append(
-                        (
-                            CourseResult(
-                                slug=slug,
-                                downloaded=0,
-                                skipped=0,
-                                failed=[slug],
-                                status="failed",
-                            ),
-                            str(exc),
+    # The live rows go to stderr and the final summary to stdout, so
+    # `download > run.log` keeps the summary clean while the per-video lines
+    # still stream to the terminal.
+    reporter = build_reporter(Console(stderr=True), quiet=quiet)
+    try:
+        with _open_browser(settings) as browser:
+            if not _probe_logged_in(browser):
+                return 1
+            provider = build_stage1_provider(browser)
+            # ONE HTTP client for the whole run: the provider resolves a fresh
+            # signed CDN URL per video, and every one of them transfers through
+            # this session with the browser's cookies attached.
+            with FetcherSession(impersonate="chrome") as client:
+                session = _CookieSession(client, _cookie_values(browser.cookies()))
+                download = make_downloader(session)
+                for slug in courses:
+                    # The try covers everything done for this course. One typed
+                    # error anywhere in it costs one summary line; the next
+                    # course still runs. An untyped error escaping here would be
+                    # a traceback that aborts the run — the failure this project
+                    # keeps eliminating — which is why li/errors.py exists.
+                    try:
+                        result = download_course(
+                            provider,
+                            slug,
+                            settings.output_root,
+                            settings.resolution,
+                            download,
+                            reporter=reporter,
                         )
-                    )
+                        results.append((result, None))
+                    except LiError as exc:
+                        reporter.fail(str(exc))
+                        results.append(
+                            (
+                                CourseResult(
+                                    slug=slug,
+                                    downloaded=0,
+                                    skipped=0,
+                                    failed=[slug],
+                                    status="failed",
+                                ),
+                                str(exc),
+                            )
+                        )
+    finally:
+        # Whatever happened -- including a KeyboardInterrupt unwinding through
+        # here -- the live region has to be closed or the cursor is left
+        # sitting on a spinner.
+        reporter.close()
     for result, reason in results:
         _print_result(result, reason)
     return 1 if any(result.status == "failed" for result, _ in results) else 0
@@ -457,12 +486,14 @@ def _print_result(result: CourseResult, reason: str | None = None) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv``, run one subcommand, and return its exit code."""
+    args = build_parser().parse_args(argv)
+    verbose = bool(getattr(args, "verbose", False))
     # li.browser narrates the login flow through logging; with no handler
     # configured here its INFO lines — including "complete the login in the
     # Chrome window" — are silently dropped, and the user waits on a form
-    # nothing told them about.
-    logging.basicConfig(format="%(message)s", level=logging.INFO)
-    args = build_parser().parse_args(argv)
+    # nothing told them about. login and status therefore always get the full
+    # level, while download drops to WARNING unless --verbose asks otherwise.
+    configure_logging(verbose=verbose or args.command != "download")
     load_env()
     try:
         settings = build_settings(args, os.environ)
@@ -481,7 +512,7 @@ def main(argv: list[str] | None = None) -> int:
             print(NO_COURSES_MESSAGE, file=sys.stderr)
             return 1
         if args.command == "download":
-            return _run_download(settings, courses)
+            return _run_download(settings, courses, quiet=bool(getattr(args, "quiet", False)), verbose=verbose)
         if args.command == "status":
             return _run_status(settings, courses)
         raise AssertionError(f"unhandled command: {args.command}")

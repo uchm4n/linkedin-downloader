@@ -1,4 +1,4 @@
-"""Streaming download helpers: backoff, progress, and partial-file cleanup.
+"""Streaming download helpers: backoff and partial-file cleanup.
 
 The response is a Scrapling ``Response``: verified on scrapling 0.4.15, its
 body is read eagerly by ``ResponseFactory.from_http_request`` and is always
@@ -7,15 +7,18 @@ fully buffered as ``.body`` (bytes) by the time we see it, alongside plain
 ``iter_content`` and no ``raise_for_status`` -- those are ``requests`` API and
 do not exist here, so nothing in this module looks for them.
 
+That eager buffering is why this module draws no progress bar. A bar here
+would animate over slices of a buffer that is already complete, reporting
+transfer progress for a memory copy. The user-facing progress lives one level
+up, in :mod:`li.console`, which shows an indeterminate spinner for the real
+network wait and then the file's actual size.
+
 This module sits between the metadata layer and the filesystem and guarantees
 that a failed transfer never leaves a half-written file behind.
 """
 
 import time
 from pathlib import Path
-
-from tqdm import tqdm
-
 from li.errors import DownloadFailed, RateLimited
 
 CHUNK_SIZE = 32 * 1024
@@ -27,23 +30,7 @@ def ensure_dir(p: Path) -> Path:
     return p
 
 
-def stream_chunks(body: bytes, size: int = 32 * 1024, desc: str = "", total: int | None = None):
-    """Yield ``body`` in ``size`` byte slices under a tqdm bar named ``desc``.
-
-    The body is already fully buffered (Scrapling reads the response eagerly),
-    so progress is reported over slices of that buffer; ``total`` defaults to
-    the body's length.
-    """
-    if total is None:
-        total = len(body)
-    with tqdm(total=total, unit="B", unit_scale=True, desc=desc) as bar:
-        for start in range(0, len(body), size):
-            chunk = body[start : start + size]
-            bar.update(len(chunk))
-            yield chunk
-
-
-def download_to(url: str, dest: Path, session, *, desc: str = "", attempts: int = 3) -> None:
+def download_to(url: str, dest: Path, session, *, attempts: int = 3) -> None:
     """Stream ``url`` to ``dest`` through ``session``, retrying rate limits only.
 
     On HTTP 429 the transfer waits ``2 ** attempt`` seconds and retries up to
@@ -95,8 +82,8 @@ def download_to(url: str, dest: Path, session, *, desc: str = "", attempts: int 
 
         try:
             with open(dest, "wb") as fh:
-                for chunk in stream_chunks(body, CHUNK_SIZE, desc=desc):
-                    fh.write(chunk)
+                for start in range(0, len(body), CHUNK_SIZE):
+                    fh.write(body[start : start + CHUNK_SIZE])
         except Exception as exc:
             dest.unlink(missing_ok=True)
             raise DownloadFailed(str(exc)) from exc
