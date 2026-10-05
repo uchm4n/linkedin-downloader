@@ -165,6 +165,7 @@ def download_course(
     resolution: str,
     downloader: Downloader,
     reporter: Reporter | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> CourseResult:
     """Download every video and exercise file of ``slug`` under ``output_root``.
 
@@ -177,8 +178,15 @@ def download_course(
     ``reporter`` is optional and defaults to :class:`~li.console.NullReporter`,
     so every caller that does not want a console -- which is all of the
     tests -- keeps working unchanged and prints nothing.
+
+    ``should_stop`` is polled at item boundaries and never inside one. That
+    placement is deliberate: a video whose transfer is already in flight
+    should be allowed to finish, because abandoning it mid-write is what
+    leaves a truncated ``.mp4`` behind. The caller sees a stop request on the
+    very next check.
     """
     report: Reporter = reporter or NullReporter()
+    stopping = should_stop or (lambda: False)
     try:
         course = provider.get_course(slug)
     except CourseUnavailable:
@@ -207,6 +215,14 @@ def download_course(
     for chapter in course.chapters:
         chapter_path = ensure_dir(chapter_dir(course, chapter, output_root))
         for video in chapter.videos:
+            if stopping():
+                # Checked between items, never inside one, so nothing is
+                # abandoned half-written. What is already on disk stays.
+                return CourseResult(
+                    slug=slug, downloaded=downloaded, skipped=skipped,
+                    failed=failed,
+                    status="partial" if failed else "complete",
+                )
             mp4_path = chapter_path / video_filename(video)
             srt_path = chapter_path / subtitle_filename(video)
             outcome = _process_video(provider, slug, video, resolution, mp4_path, srt_path,downloader, report)

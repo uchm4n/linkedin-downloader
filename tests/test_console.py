@@ -183,3 +183,21 @@ def test_quiet_scrapling_silences_the_third_party_logger():
         log.handlers = saved[0]
         log.propagate = saved[1]
         log.level = saved[2]
+
+
+def test_verbose_restores_scrapling_records_without_reintroducing_duplicates():
+    # --verbose has to bring the log back, but still through ONE handler.
+    # Leaving propagate False with no handlers attached would make --verbose
+    # silently print nothing, which is worse than being noisy.
+    import logging
+    log = logging.getLogger("scrapling")
+    saved = (list(log.handlers), log.propagate, log.level)
+    try:
+        quiet_scrapling(logging.INFO, verbose=True)
+        assert log.handlers == [], "the private handler must stay detached"
+        assert log.propagate is True, "records need somewhere to go"
+        assert log.level == logging.INFO
+    finally:
+        log.handlers = saved[0]
+        log.propagate = saved[1]
+        log.level = saved[2]

@@ -173,7 +173,12 @@ def _join_authors(course: dict, index: dict) -> str:
     for reference in references:
         author = index.get(reference)
         if author is None:
-            logger.warning("Unresolved author reference: %r", reference)
+            # Per-item, not per-course: a course whose TOC lists 16
+            # assessments logs 16 lines here, which is the noise the reporter
+            # exists to remove. The count is reported once, at the end, by
+            # map_course's aggregate -- and the item detail stays reachable
+            # under --verbose.
+            logger.info("Unresolved author reference: %r", reference)
             continue
         names.append((author.get("slug") or "").replace("-", " ").title())
     return ", ".join(names)
@@ -226,7 +231,7 @@ def map_course(payload: dict) -> Course:
         section = index.get(reference.get("*section")) if isinstance(reference, dict) else None
         if section is None:
             unresolved_count += 1
-            logger.warning("Unresolved section reference: %r", reference)
+            logger.info("Unresolved section reference: %r", reference)
             continue
         videos: list[Video] = []
         for item in section.get("items") or []:
@@ -236,7 +241,8 @@ def map_course(payload: dict) -> Course:
             entity = _resolve_video(index, item)
             if entity is None:
                 unresolved_count += 1
-                logger.warning(
+                # Per-item detail; the count is aggregated below.
+                logger.info(
                     "Unresolvable video item in section %r: %r",
                     section.get("title"),
                     item,
@@ -254,6 +260,10 @@ def map_course(payload: dict) -> Course:
     if article_count:
         logger.info("Excluded %d article item(s) from chapters[].videos", article_count)
     if unresolved_count:
+        # One line for the whole course instead of one per item. Left at
+        # WARNING so it survives the default level: it is the only signal
+        # that some lessons are being passed over, and a user who is not
+        # counting videos should still be told.
         logger.warning("Skipped %d unresolved recipe reference(s)", unresolved_count)
 
     return Course(
@@ -320,7 +330,7 @@ def _transcript(video_entity: dict, entities: list[dict] | None) -> list[dict] |
     for reference in references:
         transcript_entity = index.get(reference) if isinstance(reference, str) else None
         if transcript_entity is None:
-            logger.warning("Unresolved transcript reference: %r", reference)
+            logger.info("Unresolved transcript reference: %r", reference)
             continue
         lines = transcript_entity.get("lines")
         if _is_caption_lines(lines):

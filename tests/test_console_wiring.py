@@ -39,6 +39,12 @@ class RecordingReporter:
     def summary(self, text):
         self.events.append(("summary", text))
 
+    def busy(self, text):
+        self.events.append(("busy", text))
+
+    def idle(self):
+        self.events.append(("idle", ""))
+
 
 def _course(slugs):
     videos = [Video(name=s, slug=s, index=i, filename=f"{i:02d} - {s}.mp4")
@@ -124,3 +130,39 @@ def test_a_course_header_precedes_the_items(tmp_path):
                     reporter=r)
     assert r.events[0] == ("course", "C")
     assert r.events[1][0] == "start"
+
+
+# --- cooperative stop ----------------------------------------------------
+
+def test_should_stop_halts_the_walk_at_the_next_item(tmp_path):
+    # The stop is checked BETWEEN items, never inside one: a video already
+    # half-transferred should be allowed to finish (or clean up after itself)
+    # rather than be abandoned by a flag landing mid-write.
+    r = RecordingReporter()
+    stop = {"flag": False}
+
+    def should_stop():
+        # True from the second item onward.
+        stop["flag"] = True
+        return stop["flag"]
+
+    result = download_course(Provider(_course(["a", "b", "c", "d"])), "c",
+                             tmp_path, "720", _dl(), reporter=r,
+                             should_stop=should_stop)
+    started = [e[1] for e in r.events if e[0] == "start"]
+    assert len(started) < 4, f"walk did not stop early: {started}"
+    assert result.status in ("complete", "partial")
+
+
+def test_a_stop_before_the_first_item_downloads_nothing(tmp_path):
+    r = RecordingReporter()
+    result = download_course(Provider(_course(["a", "b"])), "c", tmp_path, "720",
+                             _dl(), reporter=r, should_stop=lambda: True)
+    assert result.downloaded == 0
+    assert not [e for e in r.events if e[0] == "done"]
+
+
+def test_no_should_stop_means_never_stopping(tmp_path):
+    result = download_course(Provider(_course(["a", "b"])), "c", tmp_path, "720",
+                             _dl())
+    assert result.downloaded == 2

@@ -64,7 +64,7 @@ def test_quiet_and_verbose_are_mutually_exclusive():
 def test_build_reporter_hides_successes_under_quiet():
     import io
     from rich.console import Console
-    from li.console import RichReporter, build_reporter
+    from li.console import build_reporter
 
     def run(**kw):
         buf = io.StringIO()
@@ -81,3 +81,26 @@ def test_build_reporter_hides_successes_under_quiet():
     assert "01 - ok" not in run(quiet=True)
     assert "nope" in run(quiet=True), "--quiet must still report failures"
     assert "1 failed" in run(quiet=True)
+
+
+def test_cdn_get_passes_an_explicit_generous_timeout():
+    """curl's default is a whole-transfer cap, and it is far too small here.
+
+    Measured: a 92 MB exercise file died at 30s with ~55 MB received, and
+    since every retry restarts from byte zero it could never complete. The
+    timeout therefore has to be passed explicitly and be much larger than
+    curl's default.
+    """
+    from main import TRANSFER_TIMEOUT_S, _CookieSession
+
+    seen = {}
+
+    class Client:
+        def get(self, url, **kw):
+            seen.update(kw)
+            return "response"
+
+    session = _CookieSession(Client(), {"li_at": "x"})
+    assert session.get("https://cdn/v.mp4") == "response"
+    assert seen["timeout"] == TRANSFER_TIMEOUT_S
+    assert seen["timeout"] >= 300, "must outlast a slow multi-MB/s transfer"

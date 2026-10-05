@@ -25,6 +25,7 @@ import argparse
 import logging
 import os
 import sys
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from li.config import Settings, build_settings, load_env
 from li.console import build_reporter, configure_logging
 from li.course import download_course
 from li.errors import AuthRequired, LiError
+from li.interrupt import InterruptHandler
 from li.models import Course, CourseResult
 from li.naming import chapter_dir
 from li.providers import build_stage1_provider
@@ -59,6 +61,19 @@ PROBE_UNREADABLE_MESSAGE = (
     "transient, so try again before re-running `python downloader.py login`."
 )
 
+#: How long the main thread waits for the browser worker before giving up on
+#: a clean join. Deliberately short: if the worker is wedged inside a
+#: transfer, no amount of waiting helps, and the second Ctrl+C exists
+#: precisely so the user is never trapped.
+_WORKER_JOIN_TIMEOUT_S = 5.0
+
+#: Whole-transfer cap for a CDN GET, in seconds. Deliberately far above
+#: curl's 30s default: see :meth:`_CookieSession.get` for the measurement
+#: that made the default unusable. Ten minutes is still well inside the
+#: ~54 minutes a signed stream URL lives, so a slow transfer finishes while
+#: its URL is still valid.
+TRANSFER_TIMEOUT_S = 600.0
+
 
 class _CookieSession:
     """The ``session`` object :func:`li.storage.download_to` expects.
@@ -79,15 +94,26 @@ class _CookieSession:
     ``ValueError: too many values to unpack`` inside it.
     """
 
-    __slots__ = ("_client", "_cookies")
+    __slots__ = ("_client", "_cookies", "_timeout")
 
-    def __init__(self, client: Any, cookies: dict[str, str]) -> None:
+    def __init__(self, client: Any, cookies: dict[str, str],
+                 timeout: float = TRANSFER_TIMEOUT_S) -> None:
         self._client = client
         self._cookies = cookies
+        self._timeout = timeout
 
     def get(self, url: str) -> Any:
-        """``GET url`` through the shared client, carrying the browser's cookies."""
-        return self._client.get(url, cookies=self._cookies)
+        """``GET url`` through the shared client, carrying the browser's cookies.
+
+        The timeout is explicit and generous because curl's default is a
+        *whole-transfer* cap, not a per-read one. Measured on this account:
+        a 92 MB exercise file was killed at 30s having received ~55 MB, and
+        because each retry restarts from byte zero it could never finish --
+        three attempts, three failures, every run. A cap is only useful here
+        if it outlasts the slowest legitimate transfer; the run's second
+        Ctrl+C stays the way out of a genuinely hung socket.
+        """
+        return self._client.get(url, cookies=self._cookies, timeout=self._timeout)
 
 
 def _cookie_values(browser_cookies: list[dict]) -> dict[str, str]:
@@ -368,62 +394,130 @@ def _run_login(settings: Settings) -> int:
     return 1
 
 
+def _download_all(settings: Settings, courses: list[str], reporter: Any, should_stop: Any, results: list) -> None:
+    with _open_browser(settings) as browser:
+        if not _probe_logged_in(browser):
+            results.append(None)
+            return
+        provider = build_stage1_provider(browser)
+        # ONE HTTP client for the whole run: the provider resolves a fresh
+        # signed CDN URL per video, and every one of them transfers through
+        # this session with the browser's cookies attached.
+        with FetcherSession(impersonate="chrome") as client:
+            session = _CookieSession(client, _cookie_values(browser.cookies()))
+            download = make_downloader(session)
+            for slug in courses:
+                # Each course's page load is a silent stretch of several
+                # seconds, which reads as a hang for exactly as long as it
+                # lasts. Say what is being read.
+                reporter.busy(f"Reading {slug}…")
+                # The try covers everything done for this course. One typed
+                # error anywhere in it costs one summary line; the next
+                # course still runs. An untyped error escaping here would be
+                # a traceback that aborts the run — the failure this project
+                # keeps eliminating — which is why li/errors.py exists.
+                try:
+                    result = download_course(
+                        provider,
+                        slug,
+                        settings.output_root,
+                        settings.resolution,
+                        download,
+                        reporter=reporter,
+                        should_stop=should_stop,
+                    )
+                    results.append((result, None))
+                except LiError as exc:
+                    reporter.fail(str(exc))
+                    results.append(
+                        (
+                            CourseResult(
+                                slug=slug,
+                                downloaded=0,
+                                skipped=0,
+                                failed=[slug],
+                                status="failed",
+                            ),
+                            str(exc),
+                        )
+                    )
+                if should_stop():
+                    break
+
+
 def _run_download(settings: Settings, courses: list[str], *, quiet: bool = False, verbose: bool = False) -> int:
-    """Download every course in ``courses``, then print one line per course."""
-    results: list[tuple[CourseResult, str | None]] = []
+    """Download every course in ``courses``, then print one line per course.
+
+    **The worker thread is load-bearing, not tidiness.** Chrome and the CDN
+    transfers block in C, and CPython only delivers a signal to the
+    interpreter between bytecodes: measured on this project, a SIGINT went
+    undelivered for 36 seconds while a stalled transfer held the main thread.
+    Keeping that work on a worker leaves the main thread in ``Event.wait``,
+    which returns promptly and lets :class:`~li.interrupt.InterruptHandler`
+    work -- first Ctrl+C answers at once and stops at the next item boundary,
+    a second leaves immediately.
+    """
+    results: list[tuple[CourseResult, str | None] | None] = []
     # The live rows go to stderr and the final summary to stdout, so
     # `download > run.log` keeps the summary clean while the per-video lines
     # still stream to the terminal.
     reporter = build_reporter(Console(stderr=True), quiet=quiet)
+    # Startup has no per-item output to show and takes long enough -- real
+    # Chrome launching, then proving the session can read a course -- that
+    # silence there reads as a hang.
+    reporter.busy("Starting Chrome and checking your LinkedIn session…")
+    interrupts = InterruptHandler().install()
+    done = threading.Event()
+
+    def work() -> None:
+        try:
+            _download_all(settings, courses, reporter, should_stop, results)
+        except BaseException as exc:  # noqa: BLE001 - see below
+            # An exception on a worker thread does NOT propagate to main, so
+            # without this it would print a traceback and the run would still
+            # exit 0 -- reporting success for work that never happened.
+            crash.append(exc)
+        finally:
+            done.set()
+
+    # A property, not a method: `interrupts.should_stop` is already a bool,
+    # so it has to be wrapped before _download_all can poll it.
+    def should_stop() -> bool:
+        return interrupts.should_stop
+
+    crash: list[BaseException] = []
+    worker = threading.Thread(target=work, name="download", daemon=True)
+    worker.start()
     try:
-        with _open_browser(settings) as browser:
-            if not _probe_logged_in(browser):
-                return 1
-            provider = build_stage1_provider(browser)
-            # ONE HTTP client for the whole run: the provider resolves a fresh
-            # signed CDN URL per video, and every one of them transfers through
-            # this session with the browser's cookies attached.
-            with FetcherSession(impersonate="chrome") as client:
-                session = _CookieSession(client, _cookie_values(browser.cookies()))
-                download = make_downloader(session)
-                for slug in courses:
-                    # The try covers everything done for this course. One typed
-                    # error anywhere in it costs one summary line; the next
-                    # course still runs. An untyped error escaping here would be
-                    # a traceback that aborts the run — the failure this project
-                    # keeps eliminating — which is why li/errors.py exists.
-                    try:
-                        result = download_course(
-                            provider,
-                            slug,
-                            settings.output_root,
-                            settings.resolution,
-                            download,
-                            reporter=reporter,
-                        )
-                        results.append((result, None))
-                    except LiError as exc:
-                        reporter.fail(str(exc))
-                        results.append(
-                            (
-                                CourseResult(
-                                    slug=slug,
-                                    downloaded=0,
-                                    skipped=0,
-                                    failed=[slug],
-                                    status="failed",
-                                ),
-                                str(exc),
-                            )
-                        )
+        # The timeout is what keeps this loop interruptible; a bare
+        # done.wait() would park the main thread inside a lock acquire.
+        while not done.wait(0.2):
+            pass
+    except KeyboardInterrupt:
+        # The handler normally deals with this; a SIGINT landing outside its
+        # window still arrives here.
+        interrupts.request_stop()
     finally:
-        # Whatever happened -- including a KeyboardInterrupt unwinding through
-        # here -- the live region has to be closed or the cursor is left
-        # sitting on a spinner.
+        # Join, but never indefinitely: a worker wedged in a transfer cannot
+        # be rescued, and blocking here would defeat the escape hatch the
+        # second Ctrl+C exists to provide.
+        worker.join(timeout=_WORKER_JOIN_TIMEOUT_S)
+        interrupts.uninstall()
         reporter.close()
-    for result, reason in results:
+
+    reported = [entry for entry in results if entry is not None]
+    for result, reason in reported:
         _print_result(result, reason)
-    return 1 if any(result.status == "failed" for result, _ in results) else 0
+    if crash:
+        # Re-raised on the main thread so it gets a traceback and a non-zero
+        # exit, which is what an untyped failure anywhere in this project is
+        # supposed to produce.
+        print(f"\nUnexpected error: {crash[0]!r}", file=sys.stderr)
+        raise crash[0]
+    if len(reported) != len(results):
+        # The probe refused the session; _probe_logged_in already explained.
+        return 1
+    return 1 if any(result.status == "failed" for result, _ in reported) else 0
 
 
 def _count_present(course: Course, output_root: Path) -> int:

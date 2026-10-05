@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from typing import Any, Protocol
 
 from rich.console import Console, RenderableType
@@ -61,22 +62,30 @@ GLYPH_SKIP = "○"
 GLYPH_RETRY = "↻"
 GLYPH_FAIL = "✗"
 
+#: Frames for the startup spinner. Reused across phases so the animation
+#: does not visibly restart between them.
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
-def quiet_scrapling(level: int = logging.WARNING) -> None:
-    """Stop ``scrapling`` from printing a line per page load, twice.
+
+def quiet_scrapling(level: int = logging.WARNING, *, verbose: bool = False) -> None:
+    """Make ``scrapling`` print once, or not at all.
 
     Its logger carries its own ``StreamHandler`` *and* propagates, so each
     record is emitted by that handler and again by the root handler -- the
     reason ``Fetched (200) <GET ...>`` appeared on two lines per request.
-    Setting the level alone would not help, because the handlers stay
-    attached; both are removed and propagation stopped, so the logger is
-    genuinely quiet unless something re-enables it.
+    Detaching the handler is therefore the fix; setting the level alone is
+    not, because the handlers stay attached.
+
+    ``verbose`` restores propagation but *not* the private handler, so the
+    full log comes back through the single root handler and stays
+    single-printed. Without this the records would have nowhere to go at all
+    and ``--verbose`` would appear to do nothing.
     """
     log = logging.getLogger(SCRAPLING_LOGGER)
     for handler in list(log.handlers):
         log.removeHandler(handler)
-    log.propagate = False
     log.setLevel(level)
+    log.propagate = bool(verbose)
 
 
 def format_size(size: int) -> str:
@@ -122,7 +131,7 @@ def configure_logging(*, verbose: bool = False, stream: Any = None) -> None:
     handler.setFormatter(logging.Formatter("%(message)s"))
     root.addHandler(handler)
     root.setLevel(logging.INFO if verbose else logging.WARNING)
-    quiet_scrapling(logging.INFO if verbose else logging.WARNING)
+    quiet_scrapling(logging.INFO if verbose else logging.WARNING, verbose=verbose)
 
 
 def _shorten(text: str, limit: int) -> str:
@@ -142,6 +151,8 @@ class Reporter(Protocol):
     """What :mod:`li.course` needs to tell the user about one item."""
 
     def course(self, name: str) -> None: ...
+    def busy(self, text: str) -> None: ...
+    def idle(self) -> None: ...
     def start(self, title: str) -> None: ...
     def note(self, text: str) -> None: ...
     def done(self, size: int, secs: float) -> None: ...
@@ -158,6 +169,8 @@ class NullReporter:
     """
 
     def course(self, name: str) -> None: ...
+    def busy(self, text: str) -> None: ...
+    def idle(self) -> None: ...
     def start(self, title: str) -> None: ...
     def note(self, text: str) -> None: ...
     def done(self, size: int, secs: float) -> None: ...
@@ -178,6 +191,7 @@ class RichReporter:
     def __init__(self, console: Console) -> None:
         self._console = console
         self._title = ""
+        self._busy_text = ""
         self._live = Live(console=console, refresh_per_second=12, transient=True)
         self._live_started = False
         self.counts = {"done": 0, "skipped": 0, "failed": 0}
@@ -194,9 +208,15 @@ class RichReporter:
             self._live_started = False
 
     def _paint_live(self) -> None:
-        """Show the in-flight row, but only where a live region exists."""
-        if self._live_started and self._console.is_terminal:
-            self._live.update(self._compose(GLYPH_WORKING, "cyan", self._title, "", ""))
+        """Show the spinner or the in-flight row, but only where a live
+        region exists -- a redirected log gets the committed lines only."""
+        if not (self._live_started and self._console.is_terminal):
+            return
+        if self._busy_text:
+            frame = _SPINNER_FRAMES[int(time.monotonic() * 12) % len(_SPINNER_FRAMES)]
+            self._live.update(Text(f"{frame} {self._busy_text}", style="cyan"))
+            return
+        self._live.update(self._compose(GLYPH_WORKING, "cyan", self._title, "", ""))
 
     # -- line composition ------------------------------------------------
     def _compose(self, glyph: str, style: str, title: str,
@@ -257,6 +277,23 @@ class RichReporter:
         self._finish_open_row()
         self._console.print(Text(f"\n{name}", style="bold magenta"))
 
+    def busy(self, text: str) -> None:
+        """Show a spinner for a phase with nothing to enumerate.
+
+        Startup is the motivating case: launching Chrome, checking the
+        session and reading the first course take long enough that silence
+        reads as a hang. No progress is implied -- the frame just moves.
+        """
+        self._finish_open_row()
+        self._busy_text = text
+        self._ensure_live()
+        self._paint_live()
+
+    def idle(self) -> None:
+        """Clear the spinner so real per-item rows can take the line."""
+        self._busy_text = ""
+        self._stop_live()
+
     def start(self, title: str) -> None:
         self._finish_open_row()
         self._title = title
@@ -301,10 +338,16 @@ class RichReporter:
         self._finish_open_row()
 
     def _finish_open_row(self) -> None:
-        """Retire a row that was never given an outcome."""
-        if self._title:
+        """Retire whatever currently owns the line: a row or the spinner.
+
+        Clearing ``_busy_text`` here is what stops the startup spinner from
+        painting over the first video row -- both share one live region, so
+        whichever is set last is the one that gets drawn.
+        """
+        if self._title or self._busy_text:
             self._stop_live()
             self._title = ""
+            self._busy_text = ""
 
 
 class QuietReporter:
@@ -319,6 +362,12 @@ class QuietReporter:
         self._inner = inner
 
     def course(self, name: str) -> None:
+        pass
+
+    def busy(self, text: str) -> None:
+        pass
+
+    def idle(self) -> None:
         pass
 
     def start(self, title: str) -> None:
