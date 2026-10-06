@@ -22,7 +22,6 @@ against LinkedIn itself.
 """
 
 import argparse
-import logging
 import os
 import sys
 import threading
@@ -41,7 +40,7 @@ from li.errors import AuthRequired, LiError
 from li.interrupt import InterruptHandler
 from li.models import Course, CourseResult
 from li.naming import chapter_dir
-from li.providers import build_stage1_provider
+from li.providers import BrowserCourseProvider
 from li.storage import download_to
 
 #: The video tiers LinkedIn serves (spec section 9).
@@ -126,14 +125,13 @@ def _cookie_values(browser_cookies: list[dict]) -> dict[str, str]:
 
 
 def make_downloader(session: Any):
-    """The injected callable ``li/course.py`` expects: ``(url, dest, session)``.
+    """The injected callable ``li/course.py`` expects: ``(url, dest)``.
 
-    Its third positional argument arrives as ``None`` — ``download_course``
-    has no session of its own — so the run's one real session is closed
-    over here instead of being passed down.
+    The run's one real session is closed over here, so ``download_course``
+    never has to know a session exists.
     """
 
-    def download(url: str, dest: Path, _session: Any) -> None:
+    def download(url: str, dest: Path) -> None:
         download_to(url, dest, session)
 
     return download
@@ -282,71 +280,6 @@ def _probe_logged_in(browser: LinkedInBrowser) -> bool:
     return True
 
 
-#: The two warnings ``li/browser.py`` emits when the login form exposes
-#: no visible email field. :class:`_PrefillWarningFilter` recognises them
-#: by prefix.
-PREFILL_WARNING_PREFIXES = (
-    "Email prefill failed:",
-    "Email prefill did not complete:",
-)
-
-
-class _PrefillWarningFilter(logging.Filter):
-    """Record — and withhold — li/browser's prefill warnings for one login.
-
-    ``li/browser.py`` logs ``Email prefill failed: the login page exposes
-    no visible email field`` whenever ``pick_email_field`` finds no input
-    to fill. Two unrelated causes produce it: LinkedIn served no form at
-    all (a session it already recognises is redirected off ``/uas/login``,
-    so there is nothing to prefill), or the form genuinely lacks its
-    field. The raw line reads only as the second, blaming a selector that
-    was never the problem — and this project does not edit ``li/``, so
-    the warnings are intercepted where they are emitted: recorded here
-    for :func:`_report_missing_form`, and dropped so the user is never
-    handed a false diagnosis.
-
-    Records matching neither prefix pass through untouched, so a wording
-    change in li/ fails open: the original warnings print rather than
-    silently vanish.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.captured: list[str] = []
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        if message.startswith(PREFILL_WARNING_PREFIXES):
-            self.captured.append(message)
-            return False
-        return True
-
-
-def _report_missing_form(browser: LinkedInBrowser, captured: list[str]) -> None:
-    """Explain a login attempt that reached the page but found no field.
-
-    ``li/browser.py`` can only see that the input was missing; the CLI
-    can also see whether the attempt ended with ``li_at`` in the jar, and
-    that is what separates the causes:
-
-    * ``li_at`` present — LinkedIn authenticated the session without
-      serving a form, so there was never a field to fill. A warning only:
-      the sign-in worked, and nothing needs fixing.
-    * ``li_at`` absent — the form really did fail, so li/browser's own
-      wording is the accurate one and is passed through as it stands.
-    """
-    if browser.has_auth():
-        print(
-            "No login form was served: LinkedIn authenticated this session "
-            "without one (li_at is present now), so the email prefill had "
-            "no field to fill. The sign-in succeeded — a warning, not a "
-            "form defect.",
-            file=sys.stderr,
-        )
-        return
-    print(captured[0], file=sys.stderr)
-
-
 def login_settings(settings: Settings) -> Settings:
     """The settings ``login`` runs with: always a visible browser window.
 
@@ -363,24 +296,26 @@ def login_settings(settings: Settings) -> Settings:
 
 
 def _run_login(settings: Settings) -> int:
-    """Interactive sign-in plus one probe; downloads nothing (spec 5.2)."""
+    """Interactive sign-in plus one probe; downloads nothing (spec 5.2).
+
+    li/browser's two prefill warnings ("the login page exposes no visible
+    email field", "Email prefill did not complete") are logged at ``debug``,
+    not ``warning``. Two unrelated causes produce them: LinkedIn served no
+    form at all (a session it already recognises is redirected off
+    ``/uas/login``, so there is nothing to prefill), or the form genuinely
+    lacks the field. As warnings they read only as the second, blaming a
+    selector that was never the problem. A log filter here used to intercept
+    and re-word them; both messages are emitted from this repo, so the fix
+    belongs at the source -- and the outcome this function prints is one it
+    can verify either way.
+    """
     with _open_browser(login_settings(settings)) as browser:
         if browser.has_auth():
             # A profile that already holds li_at never fetches the form at
             # all. Say that plainly rather than leaving the user to wonder
             # where the login prompt went.
             print("Profile already holds li_at; no login form was needed.")
-        prefill = _PrefillWarningFilter()
-        li_logger = logging.getLogger("li.browser")
-        li_logger.addFilter(prefill)
-        try:
-            browser.login()
-        finally:
-            # Whatever the attempt did, li.browser stops being filtered
-            # the moment it returns — the filter is per login, not global.
-            li_logger.removeFilter(prefill)
-        if prefill.captured:
-            _report_missing_form(browser, prefill.captured)
+        browser.login()
         try:
             usable = browser.probe(LOGIN_PROBE_SLUG)
         except AuthRequired:
@@ -399,7 +334,7 @@ def _download_all(settings: Settings, courses: list[str], reporter: Any, should_
         if not _probe_logged_in(browser):
             results.append(None)
             return
-        provider = build_stage1_provider(browser)
+        provider = BrowserCourseProvider(browser)
         # ONE HTTP client for the whole run: the provider resolves a fresh
         # signed CDN URL per video, and every one of them transfers through
         # this session with the browser's cookies attached.
@@ -445,7 +380,7 @@ def _download_all(settings: Settings, courses: list[str], reporter: Any, should_
                     break
 
 
-def _run_download(settings: Settings, courses: list[str], *, quiet: bool = False, verbose: bool = False) -> int:
+def _run_download(settings: Settings, courses: list[str], *, quiet: bool = False) -> int:
     """Download every course in ``courses``, then print one line per course.
 
     **The worker thread is load-bearing, not tidiness.** Chrome and the CDN
@@ -539,7 +474,7 @@ def _run_status(settings: Settings, courses: list[str]) -> int:
     with _open_browser(settings) as browser:
         if not _probe_logged_in(browser):
             return 1
-        provider = build_stage1_provider(browser)
+        provider = BrowserCourseProvider(browser)
         for slug in courses:
             try:
                 course = provider.get_course(slug)
@@ -606,7 +541,7 @@ def main(argv: list[str] | None = None) -> int:
             print(NO_COURSES_MESSAGE, file=sys.stderr)
             return 1
         if args.command == "download":
-            return _run_download(settings, courses, quiet=bool(getattr(args, "quiet", False)), verbose=verbose)
+            return _run_download(settings, courses, quiet=bool(getattr(args, "quiet", False)))
         if args.command == "status":
             return _run_status(settings, courses)
         raise AssertionError(f"unhandled command: {args.command}")

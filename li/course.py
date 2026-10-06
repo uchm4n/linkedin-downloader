@@ -31,26 +31,29 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from li.console import NullReporter, Reporter
+from li.console import NullReporter
 from li.errors import (AuthRequired, CourseUnavailable, DownloadFailed, LiError,
                        RateLimited, VideoLocked)
 from li.models import CourseResult, Video, VideoPayload
 from li.naming import chapter_dir, course_dir, subtitle_filename, video_filename
-from li.providers import CourseProvider
 from li.storage import ensure_dir
 from li.subtitles import write_srt
 
 logger = logging.getLogger(__name__)
 
+# `provider` below is annotated Any. What it must offer is get_course(slug) ->
+# Course and get_video(course_slug, video_slug, resolution) -> VideoPayload.
+# One implementation exists (li.providers.BrowserCourseProvider) and every test
+# substitutes a duck-typed double, so a Protocol declared here would have no
+# second implementer to be checked against.
+
 # Exercise files live under the course directory: <course dir>/Exercise Files/<name>.
 EXERCISE_DIR_NAME = "Exercise Files"
 
-# The injected callable has storage.download_to's shape: url, dest, session.
-# download_course has no session to give (its signature is deliberately
-# narrow), and production callers wrap download_to with their own session, so
-# the placeholder below is ignored downstream. Every test fake takes the same
-# three positional arguments.
-Downloader = Callable[[str, Path, Any], None]
+# The injected callable: ``(url, dest)``. Two arguments, because that is all a
+# transfer needs — the HTTP session belongs to whoever injected this, not to the
+# walk.
+Downloader = Callable[[str, Path], None]
 
 # "downloaded" = a transfer happened; "skipped" = already done, no transfer;
 # "failed" = recorded in CourseResult.failed and the walk continues.
@@ -58,14 +61,14 @@ VideoOutcome = Literal["downloaded", "skipped", "failed"]
 
 
 def _process_video(
-    provider: CourseProvider,
+    provider: Any,
     course_slug: str,
     video: Video,
     resolution: str,
     mp4_path: Path,
     srt_path: Path,
     downloader: Downloader,
-    reporter: Reporter,
+    reporter: NullReporter,
 ) -> VideoOutcome:
     """Resolve one video to a downloaded, skipped or failed outcome.
 
@@ -134,7 +137,7 @@ def _process_video(
             return "skipped"
 
         try:
-            downloader(payload.url, mp4_path, None)
+            downloader(payload.url, mp4_path)
         except (VideoLocked, RateLimited) as exc:
             # Not URL expiry: a lock or a 429 is reported immediately.
             reporter.fail(str(exc))
@@ -159,12 +162,12 @@ def _process_video(
 
 
 def download_course(
-    provider: CourseProvider,
+    provider: Any,
     slug: str,
     output_root: Path,
     resolution: str,
     downloader: Downloader,
-    reporter: Reporter | None = None,
+    reporter: NullReporter | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> CourseResult:
     """Download every video and exercise file of ``slug`` under ``output_root``.
@@ -185,7 +188,7 @@ def download_course(
     leaves a truncated ``.mp4`` behind. The caller sees a stop request on the
     very next check.
     """
-    report: Reporter = reporter or NullReporter()
+    report: NullReporter = reporter or NullReporter()
     stopping = should_stop or (lambda: False)
     try:
         course = provider.get_course(slug)
@@ -245,7 +248,7 @@ def download_course(
                 continue
             started = time.monotonic()
             try:
-                downloader(exercise_file.url, dest, None)
+                downloader(exercise_file.url, dest)
             except (VideoLocked, RateLimited, DownloadFailed) as exc:
                 report.fail(str(exc))
                 failed.append(exercise_file.name)

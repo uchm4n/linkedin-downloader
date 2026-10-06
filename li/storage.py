@@ -21,8 +21,6 @@ import time
 from pathlib import Path
 from li.errors import DownloadFailed, RateLimited
 
-CHUNK_SIZE = 32 * 1024
-
 
 def ensure_dir(p: Path) -> Path:
     """Create ``p`` and its parents if needed, then return it."""
@@ -41,11 +39,13 @@ def download_to(url: str, dest: Path, session, *, attempts: int = 3) -> None:
     ``content-length`` is normal, not a mismatch. Every non-success path runs
     ``dest.unlink(missing_ok=True)`` before raising.
     """
-    if attempts < 1:
-        raise DownloadFailed(f"download_to() needs attempts >= 1: {url}")
-
+    # ponytail: the whole body is written in one call because scrapling buffers
+    # it eagerly (see the module docstring). If a streaming scrapling ever
+    # replaces that, this needs a real chunked writer back.
     ensure_dir(dest.parent)
 
+    # ``attempts < 1`` is not rejected up front: the loop then never runs and
+    # the raise after it reports that case.
     for attempt in range(attempts):
         # Status is validated before the body is trusted, so an error page can
         # never be mistaken for media bytes.
@@ -81,16 +81,15 @@ def download_to(url: str, dest: Path, session, *, attempts: int = 3) -> None:
             )
 
         try:
-            with open(dest, "wb") as fh:
-                for start in range(0, len(body), CHUNK_SIZE):
-                    fh.write(body[start : start + CHUNK_SIZE])
-        except Exception as exc:
+            # One write, not a chunk loop: scrapling already buffered the whole
+            # body in memory (see the module docstring), so slicing it into
+            # 32 KiB pieces would only measure a memory copy.
+            dest.write_bytes(body)
+        except BaseException as exc:
             dest.unlink(missing_ok=True)
-            raise DownloadFailed(str(exc)) from exc
-        except BaseException:
-            dest.unlink(missing_ok=True)
+            if isinstance(exc, Exception):
+                raise DownloadFailed(str(exc)) from exc
             raise
         return
 
-    # Unreachable with attempts >= 1: the loop always returns or raises.
     raise DownloadFailed(f"download failed: {url}")

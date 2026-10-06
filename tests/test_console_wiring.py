@@ -36,20 +36,14 @@ class RecordingReporter:
     def fail(self, reason):
         self.events.append(("fail", reason))
 
-    def summary(self, text):
-        self.events.append(("summary", text))
-
     def busy(self, text):
         self.events.append(("busy", text))
 
-    def idle(self):
-        self.events.append(("idle", ""))
-
 
 def _course(slugs):
-    videos = [Video(name=s, slug=s, index=i, filename=f"{i:02d} - {s}.mp4")
+    videos = [Video(name=s, slug=s, index=i)
               for i, s in enumerate(slugs, start=1)]
-    return Course(name="C", slug="c", description="", author="",
+    return Course(name="C", slug="c",
                   chapters=[Chapter(name="1", videos=videos, index=1)])
 
 
@@ -70,7 +64,7 @@ class Provider:
 
 
 def _dl(payload=b"0123456789"):
-    def download(url, dest, session):
+    def download(url, dest):
         Path(dest).parent.mkdir(parents=True, exist_ok=True)
         Path(dest).write_bytes(payload)
     return download

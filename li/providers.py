@@ -1,4 +1,4 @@
-"""The Stage-1 provider: browser session in, frozen data models out.
+"""The course provider: browser session in, frozen data models out.
 
 A *provider* is what the orchestrator talks to when it needs a course or
 a video's playback data. This one holds no state beyond the authenticated
@@ -15,7 +15,7 @@ downloaded" instead of a cause.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from li.errors import VideoLocked
 from li.mapping import iter_entities, map_course, map_video
@@ -25,16 +25,8 @@ if TYPE_CHECKING:
     from li.browser import LinkedInBrowser
 
 
-class CourseProvider(Protocol):
-    """What the orchestrator needs from any course source (Stage 2 adds more)."""
-
-    def get_course(self, slug: str) -> Course: ...
-
-    def get_video(self, course_slug: str, video_slug: str, resolution: str) -> VideoPayload: ...
-
-
 class BrowserCourseProvider:
-    """``CourseProvider`` backed by the persistent authenticated Chrome session."""
+    """The provider, backed by the persistent authenticated Chrome session."""
 
     def __init__(self, browser: LinkedInBrowser) -> None:
         self._browser = browser
@@ -69,8 +61,3 @@ class BrowserCourseProvider:
         if entity is None:
             raise VideoLocked(f"the recipe for {video_slug} carries no Video entity")
         return map_video(entity, resolution, payload.get("included"))
-
-
-def build_stage1_provider(browser: LinkedInBrowser) -> BrowserCourseProvider:
-    """The provider Stage 1 runs with: one authenticated browser session."""
-    return BrowserCourseProvider(browser)

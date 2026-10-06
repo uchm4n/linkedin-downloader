@@ -145,10 +145,9 @@ def test_download_to_raises_download_failed_on_other_errors(tmp_path):
 def test_every_typed_error_subclasses_li_error():
     # Task 11's CLI catches `except LiError` to print a summary. A subclass
     # quietly broken here would make failures escape that handler as a crash.
-    from li.errors import (ApiRejected, AuthRequired, BrowserFetchFailed,
-                           CourseUnavailable, LiError, MalformedPayload,
-                           VideoLocked)
-    for cls in (AuthRequired, ApiRejected, BrowserFetchFailed, CourseUnavailable,
+    from li.errors import (AuthRequired, BrowserFetchFailed, CourseUnavailable,
+                           LiError, MalformedPayload, VideoLocked)
+    for cls in (AuthRequired, BrowserFetchFailed, CourseUnavailable,
                 VideoLocked, RateLimited, DownloadFailed, MalformedPayload):
         assert issubclass(cls, LiError), cls.__name__
 

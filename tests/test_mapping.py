@@ -53,17 +53,13 @@ def test_map_course_resolves_star_references_into_sections():
     assert c.slug == "a"
     assert len(c.chapters) >= 2
     assert c.chapters[0].videos, "section 1 must resolve to at least one video"
-    assert c.chapters[0].videos[0].filename.endswith(".mp4")
+    assert c.chapters[0].videos[0].name
 
 
 def test_map_course_numbers_videos_from_one_within_each_chapter():
     c = map_course(_load("course_recipe.json"))
     for chapter in c.chapters:
         assert [v.index for v in chapter.videos] == list(range(1, len(chapter.videos) + 1))
-
-
-def test_map_course_joins_all_authors():
-    assert map_course(_load("course_recipe.json")).author == "Author One, Author Two"
 
 
 def test_map_course_excludes_articles_from_videos():

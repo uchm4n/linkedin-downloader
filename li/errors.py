@@ -13,10 +13,6 @@ class AuthRequired(LiError):
     """Raised when the session has no valid LinkedIn authentication."""
 
 
-class ApiRejected(LiError):
-    """Raised when the HTTP API refuses the request or returns a non-JSON body."""
-
-
 class BrowserFetchFailed(LiError):
     """Raised when the browser path fails to capture a page's data."""
 

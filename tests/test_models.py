@@ -16,14 +16,14 @@ def test_course_result_status_is_required():
 
 
 def test_models_are_frozen():
-    v = Video(name="n", slug="s", index=1, filename="f.mp4")
+    v = Video(name="n", slug="s", index=1)
     with pytest.raises(FrozenInstanceError):
         v.name = "other"
 
 
 def test_course_holds_chapters_in_order():
     c = Course(
-        name="C", slug="c", description="d", author="A",
+        name="C", slug="c",
         chapters=[Chapter(name="One", videos=[], index=1),
                   Chapter(name="Two", videos=[], index=2)],
     )

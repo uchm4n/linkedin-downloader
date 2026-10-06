@@ -340,7 +340,11 @@ class LinkedInBrowser:
         self._fetch(LOGIN_URL, disable_resources=True,
                     page_action=_prefill_email(self._email, out))
         if "error" in out:
-            logger.warning("Email prefill did not complete: %s", out["error"])
+            # debug, not warning: "no visible email field" is equally what an
+            # already-authenticated session produces (LinkedIn redirects it off
+            # /uas/login, so there is no form to fill), and as a warning it
+            # blamed a selector that was never broken.
+            logger.debug("Email prefill did not complete: %s", out["error"])
         return self.wait_for_login() if interactive else self.has_auth()
 
     def load_course(self, slug: str) -> dict:
@@ -404,7 +408,9 @@ class LinkedInBrowser:
         last: BrowserFetchFailed | None = None
         for attempt in range(RENDER_ATTEMPTS):
             if attempt:
-                time.sleep(RETRY_BACKOFF_S[min(attempt - 1, len(RETRY_BACKOFF_S) - 1)])
+                # 1s then 2s: a third attempt would index past the tuple, but
+                # RENDER_ATTEMPTS is 3 so there is never one.
+                time.sleep(RETRY_BACKOFF_S[attempt - 1])
             try:
                 html = self.fetch_html(url, disable_resources=disable_resources,
                                        wait_for=type_suffix)
@@ -507,6 +513,8 @@ def _prefill_email(email: str, out: dict[str, Any]) -> Callable:
             out["email_field"] = field
         except Exception as exc:  # never raise: scrapling would swallow it
             out["error"] = str(exc)
-            logger.warning("Email prefill failed: %s", exc)
+            # debug for the reason given in login(): the missing field is not
+            # evidence of a broken selector.
+            logger.debug("Email prefill failed: %s", exc)
 
     return action

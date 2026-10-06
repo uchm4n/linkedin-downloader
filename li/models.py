@@ -13,12 +13,15 @@ class ExerciseFile:
 
 @dataclass(frozen=True)
 class Video:
-    """A single lesson video within a chapter."""
+    """A single lesson video within a chapter.
+
+    No filename: :mod:`li.naming` derives it from ``index`` + ``name``, and
+    storing a second copy invited the two to drift.
+    """
 
     name: str
     slug: str
     index: int
-    filename: str
 
 
 @dataclass(frozen=True)
@@ -41,12 +44,15 @@ class VideoPayload:
 
 @dataclass(frozen=True)
 class Course:
-    """Full course metadata."""
+    """Full course metadata.
+
+    Only what the downloader acts on. ``description``/``author`` were carried
+    here and mapped from the recipe, but nothing ever read them — no metadata
+    file is written — so they were pure payload for nobody.
+    """
 
     name: str
     slug: str
-    description: str
-    author: str
     chapters: list[Chapter]
     exercise_files: list[ExerciseFile] = field(default_factory=list)
 

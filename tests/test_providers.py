@@ -2,7 +2,6 @@
 import pytest
 
 from li.errors import CourseUnavailable
-from li.models import Course, Video
 from li.providers import BrowserCourseProvider
 
 
@@ -54,7 +53,6 @@ def _video_payload(height=1080):
 def test_get_course_returns_mapped_model():
     c = BrowserCourseProvider(FakeBrowser(course_payload=_course_payload())).get_course("c")
     assert c.name == "C"
-    assert c.author == "A B C"
     assert c.chapters[0].videos[0].slug == "v"
 
 

@@ -74,13 +74,11 @@ def test_build_reporter_hides_successes_under_quiet():
         reporter.done(1024, 1.0)
         reporter.start("02 - bad")
         reporter.fail("nope")
-        reporter.summary("1 failed")
         return buf.getvalue()
 
     assert "01 - ok" in run()
     assert "01 - ok" not in run(quiet=True)
     assert "nope" in run(quiet=True), "--quiet must still report failures"
-    assert "1 failed" in run(quiet=True)
 
 
 def test_cdn_get_passes_an_explicit_generous_timeout():

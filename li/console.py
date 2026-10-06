@@ -1,6 +1,6 @@
 """One colorized line per video, drawn in place.
 
-The orchestrator reports progress through a :class:`Reporter` rather than
+The orchestrator reports progress through a reporter rather than
 printing or logging directly, for three reasons:
 
 * **One row per item.** A single :class:`rich.live.Live` holds the item in
@@ -14,8 +14,9 @@ printing or logging directly, for three reasons:
   from disk afterwards, rather than animating a percentage that means
   nothing.
 * **Testability.** Every test passes ``reporter=None`` and gets
-  :class:`NullReporter`, so no test needs a terminal. Committed lines are
-  built by hand rather than by a :class:`rich.table.Table`, because the
+  :class:`NullReporter`, whose method set is the reporter interface; no test
+  needs a terminal. Committed lines are built by hand rather than by a
+  :class:`rich.table.Table`, because the
   arithmetic that keeps a row on one line -- truncate the title first, then
   the trailing text -- is the part worth testing, and a Table's column
   ratios hide it behind ellipsis behaviour instead.
@@ -32,7 +33,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from typing import Any, Protocol
+from typing import Any
 
 from rich.console import Console, RenderableType
 from rich.live import Live
@@ -81,11 +82,11 @@ def quiet_scrapling(level: int = logging.WARNING, *, verbose: bool = False) -> N
     single-printed. Without this the records would have nowhere to go at all
     and ``--verbose`` would appear to do nothing.
     """
-    log = logging.getLogger(SCRAPLING_LOGGER)
-    for handler in list(log.handlers):
-        log.removeHandler(handler)
-    log.setLevel(level)
-    log.propagate = bool(verbose)
+    scrapling = logging.getLogger(SCRAPLING_LOGGER)
+    for handler in list(scrapling.handlers):
+        scrapling.removeHandler(handler)
+    scrapling.setLevel(level)
+    scrapling.propagate = bool(verbose)
 
 
 def format_size(size: int) -> str:
@@ -95,21 +96,19 @@ def format_size(size: int) -> str:
         if value < 1024 or unit == "GiB":
             return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
         value /= 1024
-    return f"{value:.1f} GiB"
 
 
-def build_reporter(console: Console, *, quiet: bool = False,
-                   verbose: bool = False) -> Reporter:
+def build_reporter(console: Console, *, quiet: bool = False) -> RichReporter:
     """The reporter for one run.
 
-    ``--quiet`` drops the successful lines and keeps failures and the
-    summary. ``--verbose`` is handled by the caller restoring full logging
-    (see :func:`configure_logging`), because "more detail" means turning the
-    log records back on rather than drawing more rows -- so it deliberately
-    does not change what the reporter draws.
+    ``--quiet`` drops the successful lines and keeps failures; suppressing only
+    the successes is the point, since a quiet run that also hid its failures
+    would report nothing at all. ``--verbose`` is handled by the caller
+    restoring full logging (see :func:`configure_logging`), because "more
+    detail" means turning the log records back on rather than drawing more
+    rows -- so it deliberately does not change what is drawn.
     """
-    reporter = RichReporter(console)
-    return QuietReporter(reporter) if quiet else reporter
+    return RichReporter(console, quiet=quiet)
 
 
 def configure_logging(*, verbose: bool = False, stream: Any = None) -> None:
@@ -131,7 +130,7 @@ def configure_logging(*, verbose: bool = False, stream: Any = None) -> None:
     handler.setFormatter(logging.Formatter("%(message)s"))
     root.addHandler(handler)
     root.setLevel(logging.INFO if verbose else logging.WARNING)
-    quiet_scrapling(logging.INFO if verbose else logging.WARNING, verbose=verbose)
+    quiet_scrapling(root.level, verbose=verbose)
 
 
 def _shorten(text: str, limit: int) -> str:
@@ -147,36 +146,22 @@ def _shorten(text: str, limit: int) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
-class Reporter(Protocol):
-    """What :mod:`li.course` needs to tell the user about one item."""
-
-    def course(self, name: str) -> None: ...
-    def busy(self, text: str) -> None: ...
-    def idle(self) -> None: ...
-    def start(self, title: str) -> None: ...
-    def note(self, text: str) -> None: ...
-    def done(self, size: int, secs: float) -> None: ...
-    def skip(self, reason: str = "") -> None: ...
-    def fail(self, reason: str) -> None: ...
-    def summary(self, text: str) -> None: ...
-
-
 class NullReporter:
-    """Accepts every call and prints nothing.
+    """What :mod:`li.course` needs to tell the user about one item, printing nothing.
 
     The default when no console is injected, so unit tests of the
-    orchestrator never need a terminal.
+    orchestrator never need a terminal. Its no-op method set is the de-facto
+    interface: :class:`RichReporter` satisfies it structurally, and no caller
+    declares it.
     """
 
     def course(self, name: str) -> None: ...
     def busy(self, text: str) -> None: ...
-    def idle(self) -> None: ...
     def start(self, title: str) -> None: ...
     def note(self, text: str) -> None: ...
     def done(self, size: int, secs: float) -> None: ...
     def skip(self, reason: str = "") -> None: ...
     def fail(self, reason: str) -> None: ...
-    def summary(self, text: str) -> None: ...
 
 
 class RichReporter:
@@ -188,13 +173,13 @@ class RichReporter:
     whole run, just without the spinner.
     """
 
-    def __init__(self, console: Console) -> None:
+    def __init__(self, console: Console, *, quiet: bool = False) -> None:
         self._console = console
+        self._quiet = quiet
         self._title = ""
         self._busy_text = ""
         self._live = Live(console=console, refresh_per_second=12, transient=True)
         self._live_started = False
-        self.counts = {"done": 0, "skipped": 0, "failed": 0}
 
     # -- Live lifecycle ---------------------------------------------------
     def _ensure_live(self) -> None:
@@ -267,15 +252,19 @@ class RichReporter:
         if title:
             self._console.print(self._compose(glyph, style, title,
                                               size_field, trailing, trailing_style))
-        else:
+        elif trailing:
             # An outcome with no open row (a course-level failure) still has
             # to be said; print the text on its own rather than dropping it.
             self._console.print(Text(trailing, style=trailing_style or style))
 
     # -- Reporter --------------------------------------------------------
+    # ``quiet`` (``--quiet``) drops the successes and keeps the failures. Each
+    # suppressed method still retires the open row first, so a suppressed line
+    # cannot leave a stale title behind for the next item to inherit.
     def course(self, name: str) -> None:
         self._finish_open_row()
-        self._console.print(Text(f"\n{name}", style="bold magenta"))
+        if not self._quiet:
+            self._console.print(Text(f"\n{name}", style="bold magenta"))
 
     def busy(self, text: str) -> None:
         """Show a spinner for a phase with nothing to enumerate.
@@ -285,14 +274,11 @@ class RichReporter:
         reads as a hang. No progress is implied -- the frame just moves.
         """
         self._finish_open_row()
+        if self._quiet:
+            return
         self._busy_text = text
         self._ensure_live()
         self._paint_live()
-
-    def idle(self) -> None:
-        """Clear the spinner so real per-item rows can take the line."""
-        self._busy_text = ""
-        self._stop_live()
 
     def start(self, title: str) -> None:
         self._finish_open_row()
@@ -306,33 +292,32 @@ class RichReporter:
             return
         title = self._title
         self._stop_live()
-        self._console.print(self._compose(GLYPH_RETRY, "yellow", title, "", text))
+        if not self._quiet:
+            self._console.print(self._compose(GLYPH_RETRY, "yellow", title, "", text))
         self._ensure_live()
         self._paint_live()
 
     def done(self, size: int, secs: float) -> None:
         if not self._title:
             return
-        self.counts["done"] += 1
+        if self._quiet:
+            self._finish_open_row()
+            return
         self._commit(GLYPH_DONE, "green",
                      f"{format_size(size)}  {secs:.1f}s")
 
     def skip(self, reason: str = "") -> None:
         if not self._title:
             return
-        self.counts["skipped"] += 1
+        if self._quiet:
+            self._finish_open_row()
+            return
         self._commit(GLYPH_SKIP, "dim", "", reason or "skipped")
 
     def fail(self, reason: str) -> None:
         if not self._title:
             return
-        self.counts["failed"] += 1
         self._commit(GLYPH_FAIL, "red", "", reason)
-
-    def summary(self, text: str) -> None:
-        self._finish_open_row()
-        style = "bold red" if self.counts["failed"] else "bold green"
-        self._console.print(Text(text, style=style))
 
     def close(self) -> None:
         self._finish_open_row()
@@ -348,45 +333,3 @@ class RichReporter:
             self._stop_live()
             self._title = ""
             self._busy_text = ""
-
-
-class QuietReporter:
-    """Drops successes, keeps failures and the summary.
-
-    Backs ``--quiet``. Suppressing only the successes is the point: a quiet
-    run that also hid its failures and its totals would report nothing at
-    all, which is the opposite of useful.
-    """
-
-    def __init__(self, inner: RichReporter) -> None:
-        self._inner = inner
-
-    def course(self, name: str) -> None:
-        pass
-
-    def busy(self, text: str) -> None:
-        pass
-
-    def idle(self) -> None:
-        pass
-
-    def start(self, title: str) -> None:
-        self._inner.start(title)
-
-    def note(self, text: str) -> None:
-        pass
-
-    def done(self, size: int, secs: float) -> None:
-        self._inner._finish_open_row()
-
-    def skip(self, reason: str = "") -> None:
-        self._inner._finish_open_row()
-
-    def fail(self, reason: str) -> None:
-        self._inner.fail(reason)
-
-    def summary(self, text: str) -> None:
-        self._inner.summary(text)
-
-    def close(self) -> None:
-        self._inner.close()

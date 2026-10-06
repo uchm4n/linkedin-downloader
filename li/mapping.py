@@ -11,12 +11,10 @@ import json
 import logging
 import re
 from collections.abc import Iterator
-from dataclasses import replace
 from html import unescape
 
 from li.errors import MalformedPayload, VideoLocked
 from li.models import Chapter, Course, ExerciseFile, Video, VideoPayload
-from li.naming import video_filename
 
 logger = logging.getLogger(__name__)
 
@@ -150,45 +148,11 @@ def _resolve_video(index: dict, item: dict) -> dict | None:
 
 
 def _to_video(entity: dict, position: int) -> Video:
-    stub = Video(
+    return Video(
         name=entity.get("title") or "",
         slug=entity.get("slug") or "",
         index=position,
-        filename="",
     )
-    return replace(stub, filename=video_filename(stub))
-
-
-def _join_authors(course: dict, index: dict) -> str:
-    """Display names of every ``*authorsV2`` reference, joined with ``, ``.
-
-    Derived from the author slug the way the legacy code did
-    (``genconnectu`` → ``Genconnectu``), with a hyphen read as a space
-    (``author-one`` → ``Author One``).
-    """
-    references = course.get("*authorsV2") or []
-    if isinstance(references, str):
-        references = [references]
-    names = []
-    for reference in references:
-        author = index.get(reference)
-        if author is None:
-            # Per-item, not per-course: a course whose TOC lists 16
-            # assessments logs 16 lines here, which is the noise the reporter
-            # exists to remove. The count is reported once, at the end, by
-            # map_course's aggregate -- and the item detail stays reachable
-            # under --verbose.
-            logger.info("Unresolved author reference: %r", reference)
-            continue
-        names.append((author.get("slug") or "").replace("-", " ").title())
-    return ", ".join(names)
-
-
-def _description(course: dict) -> str:
-    description = course.get("descriptionV3")
-    if not isinstance(description, dict):
-        return ""
-    return description.get("text") or ""
 
 
 def _exercise_files(course: dict) -> list[ExerciseFile]:
@@ -269,8 +233,6 @@ def map_course(payload: dict) -> Course:
     return Course(
         name=course.get("title") or "",
         slug=course.get("slug") or "",
-        description=_description(course),
-        author=_join_authors(course, index),
         chapters=chapters,
         exercise_files=_exercise_files(course),
     )

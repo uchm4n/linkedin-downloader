@@ -11,7 +11,7 @@ import io
 
 from rich.console import Console
 
-from li.console import NullReporter, QuietReporter, RichReporter, format_size, quiet_scrapling
+from li.console import NullReporter, RichReporter, format_size, quiet_scrapling
 
 
 def test_format_size_scales_to_the_unit():
@@ -129,6 +129,7 @@ def test_null_reporter_accepts_every_call():
     # need no terminal at all.
     n = NullReporter()
     n.course("C")
+    n.busy("b")
     n.start("v")
     n.note("n")
     n.done(1, 1.0)
@@ -137,26 +138,43 @@ def test_null_reporter_accepts_every_call():
 
 
 def test_quiet_reporter_suppresses_success_but_keeps_failures():
-    # --quiet still has to report the things that went wrong, and still has
-    # to end with the summary; hiding those would make it useless.
+    # --quiet still has to report the things that went wrong; hiding those
+    # would make it useless. It also has to drop the course header and the
+    # retry notes, or a quiet run is barely quieter than a normal one.
     buffer = io.StringIO()
-    q = QuietReporter(RichReporter(Console(file=buffer, force_terminal=False, width=100)))
-    q.course("C")
+    q = RichReporter(Console(file=buffer, force_terminal=False, width=100), quiet=True)
+    q.course("A Course Header")
+    q.busy("starting")
     q.start("01 - ok")
     q.done(1024, 1.0)
-    q.start("02 - bad")
+    q.start("02 - retried")
+    q.note("attempt 2/3")
+    q.start("03 - bad")
     q.fail("nope")
-    q.summary("1 failed")
     out = buffer.getvalue()
     assert "01 - ok" not in out
+    assert "02 - retried" not in out
+    assert "A Course Header" not in out
     assert "nope" in out
-    assert "1 failed" in out
+
+
+def test_a_suppressed_line_does_not_leak_its_title_into_the_next_item():
+    # The quiet paths must still retire the open row. If they returned early
+    # without clearing _title, the next item's failure line would be composed
+    # with the *previous* video's title -- a wrong name on a red line.
+    buffer = io.StringIO()
+    q = RichReporter(Console(file=buffer, force_terminal=False, width=100), quiet=True)
+    q.start("01 - silently skipped")
+    q.skip()
+    q.start("02 - the real failure")
+    q.fail("nope")
+    out = buffer.getvalue()
+    assert "silently skipped" not in out
+    assert "02 - the real failure" in out
+    assert "nope" in out
 
 
 def test_build_reporter_is_the_default_unfiltered_reporter():
-    import io
-    from rich.console import Console
-
     from li.console import build_reporter
 
     buf = io.StringIO()

@@ -11,11 +11,11 @@ from li.models import Chapter, Course, ExerciseFile, Video, VideoPayload
 
 
 def _course(n_videos=2, exercise=True):
-    videos = [Video(name=f"V{i}", slug=f"v{i}", index=i,
-                    filename=f"{i:02d} - V{i}.mp4") for i in range(1, n_videos + 1)]
+    videos = [Video(name=f"V{i}", slug=f"v{i}", index=i)
+              for i in range(1, n_videos + 1)]
     ch = Chapter(name="Basics", videos=videos, index=1)
     return Course(
-        name="C", slug="c", description="", author="A", chapters=[ch],
+        name="C", slug="c", chapters=[ch],
         exercise_files=[ExerciseFile(name="x.zip", url="https://x/x.zip")] if exercise else [])
 
 
@@ -47,7 +47,7 @@ class NoTranscriptProvider(FakeProvider):
 @pytest.fixture
 def dl(tmp_path):
     calls = []
-    def _dl(url, dest, session):
+    def _dl(url, dest):
         calls.append((url, Path(dest).name))
         Path(dest).parent.mkdir(parents=True, exist_ok=True)
         Path(dest).write_bytes(b"data")
@@ -86,7 +86,7 @@ def test_locked_video_is_partial_not_crash(tmp_path, dl):
 
 def test_rate_limited_video_does_not_abort_the_course(tmp_path, dl):
     p = FakeProvider(_course())
-    def boom(url, dest, session):
+    def boom(url, dest):
         if url.endswith("v1.mp4"):
             raise RateLimited("429")
         Path(dest).parent.mkdir(parents=True, exist_ok=True)
@@ -100,7 +100,7 @@ def test_rate_limited_video_does_not_abort_the_course(tmp_path, dl):
 def test_failing_exercise_file_does_not_abort_the_course(tmp_path, dl):
     # Review Focus #5: one bad exercise file must not take down the course
     p = FakeProvider(_course())
-    def boom(url, dest, session):
+    def boom(url, dest):
         if url.endswith("x.zip"):
             raise DownloadFailed("404")
         Path(dest).parent.mkdir(parents=True, exist_ok=True)
@@ -245,7 +245,7 @@ def test_expired_stream_url_triggers_one_refetch_not_a_locked_report(tmp_path, d
     p = ExpiringProvider()
     calls = {"n": 0}
 
-    def expiring_dl(url, dest, session):
+    def expiring_dl(url, dest):
         calls["n"] += 1
         if "expired" in url:
             raise DownloadFailed("HTTP 403 signed URL expired")

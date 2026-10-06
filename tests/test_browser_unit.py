@@ -124,13 +124,6 @@ def test_render_timeout_is_a_browser_fetch_failure():
     assert issubclass(RenderTimeout, BrowserFetchFailed)
 
 
-def test_render_timeout_is_a_browser_fetch_failure():
-    # Subclassing matters: step 1 widened the per-video catch to LiError, and a
-    # fresh sibling class would have escaped it and re-broken the abort bug.
-    from li.errors import BrowserFetchFailed, RenderTimeout
-    assert issubclass(RenderTimeout, BrowserFetchFailed)
-
-
 class _FakeSession:
     """A session whose fetches return scripted HTML, counting navigations.
 
