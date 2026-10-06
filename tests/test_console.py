@@ -27,6 +27,39 @@ def _console():
     return RichReporter(Console(file=buffer, force_terminal=False, width=100)), buffer
 
 
+def test_the_in_flight_video_row_animates_too(monkeypatch):
+    # The second freeze, and the one that outlived the first fix. The busy
+    # spinner animated but the in-flight video row drew a STATIC glyph
+    # (GLYPH_WORKING), so it repainted ~13 times a second showing the same
+    # character forever -- a freeze that looks alive only because it is
+    # redrawing. Both rows must go through the same per-tick frame.
+    import li.console as console_mod
+
+    buffer = io.StringIO()
+    r = RichReporter(Console(file=buffer, force_terminal=True, width=80))
+    try:
+        r.start("01 - Basics.mp4")
+        frames = set()
+        for tick in range(6):
+            monkeypatch.setattr(console_mod.time, "monotonic", lambda: tick / 12)
+            frames.add(str(r._live.get_renderable()).split()[0])
+    finally:
+        r.close()
+    assert len(frames) > 1, f"the video row never changed frame: {frames}"
+
+
+def test_the_busy_row_and_the_video_row_share_one_frame_source():
+    # Guards against the two paths drifting apart again: if the in-flight row
+    # ever gets its own static glyph back, this is the assertion that notices.
+    import li.console
+
+    assert len(set(li.console._SPINNER_FRAMES)) > 1, "the frame set must animate"
+    assert not hasattr(li.console, "GLYPH_WORKING"), (
+        "GLYPH_WORKING is the frozen in-flight glyph that caused the bug; "
+        "the row must use _frame() instead"
+    )
+
+
 def test_the_startup_spinner_actually_animates(monkeypatch):
     # The spinner frame must be recomputed at RENDER time, not once per event.
     # rich's refresh thread calls Live.refresh() ~12x/second and each call

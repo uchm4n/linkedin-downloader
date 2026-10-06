@@ -14,6 +14,12 @@ with :mod:`li.naming` for paths, an injected ``downloader`` for transfers and
 * **One bad item never kills the course.** ``VideoLocked``, ``RateLimited``
   and ``DownloadFailed`` are caught per video and per exercise file; the item's
   slug (or file name) is recorded in ``failed`` and the walk continues.
+* **Nothing is abandoned half-written.** A Ctrl+C exits the process outright
+  rather than unwinding (see :mod:`li.interrupt`), so the guarantee cannot come
+  from cleanup handlers. It comes from :func:`li.storage.download_to` writing to
+  a ``.part`` sibling and renaming it into place: an interrupted transfer leaves
+  the previous complete file, or nothing, and never a truncated one for resume
+  to trust.
 * **An unavailable course creates nothing.** ``CourseUnavailable`` returns
   before the first ``ensure_dir``, so a course the account cannot access
   leaves no half-built tree behind.
@@ -168,7 +174,6 @@ def download_course(
     resolution: str,
     downloader: Downloader,
     reporter: NullReporter | None = None,
-    should_stop: Callable[[], bool] | None = None,
 ) -> CourseResult:
     """Download every video and exercise file of ``slug`` under ``output_root``.
 
@@ -181,15 +186,8 @@ def download_course(
     ``reporter`` is optional and defaults to :class:`~li.console.NullReporter`,
     so every caller that does not want a console -- which is all of the
     tests -- keeps working unchanged and prints nothing.
-
-    ``should_stop`` is polled at item boundaries and never inside one. That
-    placement is deliberate: a video whose transfer is already in flight
-    should be allowed to finish, because abandoning it mid-write is what
-    leaves a truncated ``.mp4`` behind. The caller sees a stop request on the
-    very next check.
     """
     report: NullReporter = reporter or NullReporter()
-    stopping = should_stop or (lambda: False)
     try:
         course = provider.get_course(slug)
     except CourseUnavailable:
@@ -218,17 +216,9 @@ def download_course(
     for chapter in course.chapters:
         chapter_path = ensure_dir(chapter_dir(course, chapter, output_root))
         for video in chapter.videos:
-            if stopping():
-                # Checked between items, never inside one, so nothing is
-                # abandoned half-written. What is already on disk stays.
-                return CourseResult(
-                    slug=slug, downloaded=downloaded, skipped=skipped,
-                    failed=failed,
-                    status="partial" if failed else "complete",
-                )
             mp4_path = chapter_path / video_filename(video)
             srt_path = chapter_path / subtitle_filename(video)
-            outcome = _process_video(provider, slug, video, resolution, mp4_path, srt_path,downloader, report)
+            outcome = _process_video(provider, slug, video, resolution, mp4_path, srt_path, downloader, report)
             if outcome == "downloaded":
                 downloaded += 1
             elif outcome == "skipped":

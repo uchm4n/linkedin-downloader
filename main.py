@@ -334,7 +334,7 @@ def _run_login(settings: Settings) -> int:
     return 1
 
 
-def _download_all(settings: Settings, courses: list[str], reporter: Any, should_stop: Any, results: list) -> None:
+def _download_all(settings: Settings, courses: list[str], reporter: Any, results: list) -> None:
     with _open_browser(settings) as browser:
         if not _probe_logged_in(browser):
             results.append(None)
@@ -364,7 +364,6 @@ def _download_all(settings: Settings, courses: list[str], reporter: Any, should_
                         settings.resolution,
                         download,
                         reporter=reporter,
-                        should_stop=should_stop,
                     )
                     results.append((result, None))
                 except LiError as exc:
@@ -381,8 +380,6 @@ def _download_all(settings: Settings, courses: list[str], reporter: Any, should_
                             str(exc),
                         )
                     )
-                if should_stop():
-                    break
 
 
 def _run_download(settings: Settings, courses: list[str], *, quiet: bool = False) -> int:
@@ -393,25 +390,30 @@ def _run_download(settings: Settings, courses: list[str], *, quiet: bool = False
     interpreter between bytecodes: measured on this project, a SIGINT went
     undelivered for 36 seconds while a stalled transfer held the main thread.
     Keeping that work on a worker leaves the main thread in ``Event.wait``,
-    which returns promptly and lets :class:`~li.interrupt.InterruptHandler`
-    work -- first Ctrl+C answers at once and stops at the next item boundary,
-    a second leaves immediately.
+    where :class:`~li.interrupt.InterruptHandler` runs promptly -- Ctrl+C
+    exits the process outright, because an in-flight transfer cannot be
+    cancelled cooperatively and waiting for an item boundary is what made the
+    run look hung.
     """
     results: list[tuple[CourseResult, str | None] | None] = []
     # The live rows go to stderr and the final summary to stdout, so
     # `download > run.log` keeps the summary clean while the per-video lines
     # still stream to the terminal.
     reporter = build_reporter(Console(stderr=True), quiet=quiet)
+    # BEFORE reporter.busy(): starting the Live swaps sys.stderr for rich's
+    # FileProxy, and a handler built after that would print its message into
+    # the Live's render region, where the next refresh overwrites it. This must
+    # hold the real stderr.
+    interrupts = InterruptHandler().install()
     # Startup has no per-item output to show and takes long enough -- real
     # Chrome launching, then proving the session can read a course -- that
     # silence there reads as a hang.
     reporter.busy("Starting Chrome and checking your LinkedIn session…")
-    interrupts = InterruptHandler().install()
     done = threading.Event()
 
     def work() -> None:
         try:
-            _download_all(settings, courses, reporter, should_stop, results)
+            _download_all(settings, courses, reporter, results)
         except BaseException as exc:  # noqa: BLE001 - see below
             # An exception on a worker thread does NOT propagate to main, so
             # without this it would print a traceback and the run would still
@@ -420,27 +422,21 @@ def _run_download(settings: Settings, courses: list[str], *, quiet: bool = False
         finally:
             done.set()
 
-    # A property, not a method: `interrupts.should_stop` is already a bool,
-    # so it has to be wrapped before _download_all can poll it.
-    def should_stop() -> bool:
-        return interrupts.should_stop
-
     crash: list[BaseException] = []
     worker = threading.Thread(target=work, name="download", daemon=True)
     worker.start()
     try:
         # The timeout is what keeps this loop interruptible; a bare
         # done.wait() would park the main thread inside a lock acquire.
+        #
+        # No KeyboardInterrupt arm: the installed handler exits the process
+        # rather than raising, so a SIGINT arriving here never becomes one.
         while not done.wait(0.2):
             pass
-    except KeyboardInterrupt:
-        # The handler normally deals with this; a SIGINT landing outside its
-        # window still arrives here.
-        interrupts.request_stop()
     finally:
         # Join, but never indefinitely: a worker wedged in a transfer cannot
-        # be rescued, and blocking here would defeat the escape hatch the
-        # second Ctrl+C exists to provide.
+        # be rescued, and blocking here would wait for a Ctrl+C that can no
+        # longer be delivered to this thread.
         worker.join(timeout=_WORKER_JOIN_TIMEOUT_S)
         interrupts.uninstall()
         reporter.close()
@@ -551,8 +547,11 @@ def main(argv: list[str] | None = None) -> int:
             return _run_status(settings, courses)
         raise AssertionError(f"unhandled command: {args.command}")
     except KeyboardInterrupt:
-        # Reached only after the `with` blocks unwound, so Chrome and the
-        # HTTP client are already closed. An interrupted run is not a failure.
+        # Only `login` and `status` land here: `download` installs
+        # InterruptHandler, which exits the process on SIGINT rather than
+        # raising. Reaching here means the `with` blocks already unwound, so
+        # Chrome and the HTTP client are closed and an interrupted run is not
+        # a failure.
         print("\nInterrupted.", file=sys.stderr)
         return 0
 

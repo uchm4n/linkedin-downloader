@@ -1,5 +1,6 @@
 # tests/test_storage.py
 import time
+from pathlib import Path
 
 import pytest
 
@@ -116,6 +117,57 @@ def test_download_to_does_not_retry_a_non_429_failure(tmp_path):
     with pytest.raises(DownloadFailed):
         download_to("https://x/y.mp4", dest, s, attempts=3)
     assert s.calls == 1
+
+
+def test_an_interrupted_write_never_truncates_the_destination(tmp_path):
+    """The guarantee Ctrl+C's os._exit depends on.
+
+    li/interrupt exits the process outright, so no ``finally``/``except`` runs.
+    If a transfer wrote straight to ``dest``, an interrupt mid-write would
+    leave a short file at the path resume's ``exists()`` check trusts -- and it
+    would be trusted forever, because resume skips anything already there.
+    So the body lands in a ``.part`` sibling and is renamed into place only
+    when complete.
+    """
+    dest = tmp_path / "v.mp4"
+    dest.write_bytes(b"the previous complete download")
+
+    class Interrupt(BaseException):
+        """Not an Exception: os._exit gives no chance to clean up either."""
+
+    class InterruptingSession:
+        def get(self, url, **kw):
+            return FakeResponse(b"partial new body")
+
+    # Simulate dying exactly between the write and the rename.
+    real_write_bytes = Path.write_bytes
+
+    def explode(self, data):
+        if self.name.endswith(".part"):
+            real_write_bytes(self, data)
+            raise Interrupt
+        return real_write_bytes(self, data)
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(Path, "write_bytes", explode)
+    try:
+        with pytest.raises(Interrupt):
+            download_to("https://x/y.mp4", dest, InterruptingSession(), attempts=1)
+    finally:
+        monkey.undo()
+
+    assert dest.read_bytes() == b"the previous complete download", (
+        "the destination was left truncated; resume would trust this forever"
+    )
+
+
+def test_a_successful_transfer_leaves_no_part_file_behind(tmp_path):
+    dest = tmp_path / "v.mp4"
+    download_to("https://x/y.mp4", dest, FakeSession([FakeResponse(b"abcd")]))
+    assert dest.read_bytes() == b"abcd"
+    assert [p.name for p in tmp_path.iterdir()] == ["v.mp4"], (
+        "the .part file must be renamed, not left beside the destination"
+    )
 
 
 def test_download_to_removes_stale_file_on_failure(tmp_path):

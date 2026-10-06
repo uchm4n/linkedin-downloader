@@ -10,23 +10,17 @@ between bytecodes. Measured on this project with a real stalled transfer:
 * the same call on a **worker thread** with the main thread free: the
   handler ran **immediately**.
 
-So :func:`li.interrupt.InterruptHandler` provides the two-stage behaviour
-that measurement makes possible:
+So :func:`li.interrupt.InterruptHandler` exits the process from the handler
+itself: ``os._exit(130)`` on the first Ctrl+C. Not ``sys.exit``, which leaves
+the interpreter waiting for the worker to finish -- the exact wait being
+escaped -- and not a cooperative flag, because an in-flight transfer cannot be
+cancelled (the code blocking on it cannot see the signal) and a 600s transfer
+timeout makes "stop at the next item boundary" indistinguishable from a hang.
 
-* **first Ctrl+C** -- the handler runs at once (because the main thread is
-  free, waiting on the worker's completion event rather than inside the
-  call), prints what is happening, and sets :attr:`should_stop`. The
-  orchestrator notices between items and unwinds normally: browser closed,
-  partial files already removed, exit code 0 as an interrupted run is not a
-  failure.
-* **second Ctrl+C** -- ``os._exit(130)``. Not ``sys.exit``: raising
-  ``SystemExit`` in the main thread still leaves the interpreter waiting for
-  the non-daemon worker to finish, which is the exact wait being escaped.
-
-An in-flight transfer cannot be cancelled, because the code blocking on it
-cannot see the signal. The honest promise is therefore: the first press
-always answers immediately and stops at the next item boundary, and the
-second always terminates at once.
+The cost of leaving without unwinding is that no ``finally`` runs, so
+:func:`li.storage.download_to` writes to a ``.part`` sibling and renames it
+into place. An interrupted transfer then leaves the previous complete file, or
+nothing -- never a truncated one that resume would trust forever.
 """
 
 from __future__ import annotations
@@ -40,32 +34,34 @@ from typing import Any
 EXIT_INTERRUPTED = 130
 
 STOP_MESSAGE = (
-    "Interrupted — finishing the current item, then stopping."
-    " Press Ctrl+C again to quit immediately."
+    "Interrupted — stopping now. The item in flight is discarded; press "
+    "`login` or re-run `download` to resume from the last finished file."
 )
 
 
 class InterruptHandler:
-    """Turns SIGINT into a cooperative stop, with a hard exit as the escape.
+    """Turns SIGINT into an immediate, clean exit.
 
-    Install once, before the blocking work starts, and let the worker thread
-    poll :attr:`should_stop` at item boundaries.
+    Install once, before the blocking work starts.
+
+    The first Ctrl+C leaves at once, via :func:`os._exit`. That skips every
+    ``finally``/``except`` on the way out -- which is the point: the blocking
+    work is Chrome and a CDN transfer in C, and nothing can cancel it
+    cooperatively (a SIGINT went undelivered for 36 seconds while a stalled
+    transfer held the main thread). Waiting for an item boundary means waiting
+    for a transfer that may never finish, so the user stares at an idle
+    terminal with no way out.
+
+    Because no cleanup runs, an interrupted transfer must not be able to leave
+    a half-written file that resume would trust: :func:`li.storage.download_to`
+    writes to a ``.part`` sibling and renames it into place, so an interrupted
+    write leaves the previous complete file -- or nothing -- never a truncated
+    one.
     """
 
     def __init__(self, stream: Any = None) -> None:
         self._stream = stream if stream is not None else sys.stderr
-        self._stop = False
-        self._presses = 0
         self._previous: Any = None
-
-    @property
-    def should_stop(self) -> bool:
-        """True once the user has asked to stop. Stays true."""
-        return self._stop
-
-    def request_stop(self) -> None:
-        """Ask for a stop without a signal (used by tests and by callers)."""
-        self._stop = True
 
     def install(self) -> "InterruptHandler":
         self._previous = signal.getsignal(signal.SIGINT)
@@ -78,16 +74,19 @@ class InterruptHandler:
             self._previous = None
 
     def _on_sigint(self, signum: int, frame: Any) -> None:
-        self._presses += 1
-        if self._presses > 1:
-            # The worker may be wedged inside a transfer that cannot be
-            # cancelled. This has to work anyway, so it skips every cleanup
-            # path and leaves immediately.
-            os._exit(EXIT_INTERRUPTED)
-        self._stop = True
+        # Erase the live region before the message, on the real stderr, then
+        # leave. Two things force this to be self-contained:
+        #   * os._exit runs no cleanup, so the transient Live never gets to
+        #     erase its own region and the spinner is orphaned on screen;
+        #   * callers must construct this BEFORE any Live is started, or
+        #     sys.stderr here is rich's FileProxy and the message is printed
+        #     into a render region the next refresh overwrites.
+        # \r moves to column 0 and \x1b[2K erases the line, so the interrupted
+        # spinner does not sit above the message.
         try:
-            self._stream.write(STOP_MESSAGE + "\n")
+            self._stream.write("\r\x1b[2K" + STOP_MESSAGE + "\n")
             self._stream.flush()
         except Exception:
             # A closed or broken stream must not stop us from stopping.
             pass
+        os._exit(EXIT_INTERRUPTED)

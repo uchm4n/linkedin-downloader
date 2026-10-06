@@ -1,18 +1,22 @@
 # tests/test_interrupt.py
-"""Ctrl+C has to work, which is harder than it looks.
+"""Ctrl+C has to kill the run, and it has to kill it *now*.
 
-Measured on this project: with the blocking transfer on the main thread, a
-SIGINT was not delivered for 36 seconds -- the process only regained control
-when curl's call finally returned. With the same call on a worker thread the
-handler ran immediately. That difference is the whole design here.
+The blocking work is Chrome and a CDN transfer in C, so nothing can cancel it
+cooperatively: a transfer that has already started runs to completion or to its
+timeout, and CPython only delivers a signal between bytecodes. Measured on this
+project, a SIGINT went undelivered for 36 seconds while a stalled transfer held
+the main thread. So the first press exits the process outright -- there is no
+"stop at the next item boundary", because waiting for one is what made the run
+look hung.
 """
 import io
 import os
 import signal
+import sys
 
 import pytest
 
-from li.interrupt import InterruptHandler
+from li.interrupt import EXIT_INTERRUPTED, InterruptHandler
 
 
 @pytest.fixture
@@ -22,43 +26,58 @@ def restore_sigint():
     signal.signal(signal.SIGINT, saved)
 
 
-def test_first_press_asks_for_a_stop_and_says_so(restore_sigint):
+@pytest.fixture
+def exits(monkeypatch):
+    """Record os._exit calls instead of ending the test runner."""
+    calls = []
+    monkeypatch.setattr(os, "_exit", calls.append)
+    return calls
+
+
+def test_the_first_press_exits_immediately(restore_sigint, exits):
+    # One press, gone. Not "request a stop and hope the worker reaches an item
+    # boundary" -- that wait is unbounded from the user's side.
+    handler = InterruptHandler(stream=io.StringIO())
+    handler.install()
+    os.kill(os.getpid(), signal.SIGINT)
+    assert exits == [EXIT_INTERRUPTED], (
+        "the first Ctrl+C must exit the process, not set a flag"
+    )
+
+
+def test_the_first_press_says_something_before_it_leaves(restore_sigint, exits):
+    # A process that vanishes with no output reads as a crash, and the user has
+    # no idea whether the half-finished file is safe to keep.
     out = io.StringIO()
     handler = InterruptHandler(stream=out)
     handler.install()
-
     os.kill(os.getpid(), signal.SIGINT)
-
-    assert handler.should_stop is True
-    assert "Ctrl+C again" in out.getvalue(), out.getvalue()
+    assert "Interrupted" in out.getvalue(), out.getvalue()
 
 
-def test_a_stop_is_requested_only_once_per_run(restore_sigint):
-    # should_stop is a level, not a counter: the orchestrator checks it
-    # between items and must not see it flip back.
+def test_a_second_press_is_not_a_special_case(restore_sigint, exits):
+    # There is no longer a second stage. Both presses exit, identically.
     handler = InterruptHandler(stream=io.StringIO())
     handler.install()
     os.kill(os.getpid(), signal.SIGINT)
-    first = handler.should_stop
-    handler.request_stop()
-    assert handler.should_stop is first is True
+    os.kill(os.getpid(), signal.SIGINT)
+    assert exits == [EXIT_INTERRUPTED, EXIT_INTERRUPTED]
 
 
-def test_second_press_exits_immediately(restore_sigint, monkeypatch):
-    # The escape hatch that has to work no matter what the worker thread is
-    # blocked on. os._exit is used rather than sys.exit because SystemExit in
-    # the main thread still leaves the interpreter waiting for the non-daemon
-    # worker to finish -- the exact wait being escaped. Monkeypatched because
-    # the real thing would kill the test runner.
-    calls = []
-    monkeypatch.setattr(os, "_exit", calls.append)
+def test_a_broken_stream_does_not_prevent_the_exit(restore_sigint, exits):
+    # os._exit is the whole point; a closed or broken stderr must not turn a
+    # Ctrl+C back into a hang.
+    class Broken:
+        def write(self, _):
+            raise OSError("gone")
 
-    handler = InterruptHandler(stream=io.StringIO())
+        def flush(self):
+            raise OSError("gone")
+
+    handler = InterruptHandler(stream=Broken())
     handler.install()
     os.kill(os.getpid(), signal.SIGINT)
-    handler._on_sigint(signal.SIGINT, None)
-
-    assert calls == [130], "second press must leave at once, with 128+SIGINT"
+    assert exits == [EXIT_INTERRUPTED]
 
 
 def test_uninstall_restores_the_previous_handler(restore_sigint):
@@ -68,27 +87,40 @@ def test_uninstall_restores_the_previous_handler(restore_sigint):
     assert signal.getsignal(signal.SIGINT) is not handler._on_sigint
 
 
-def test_it_stays_quiet_when_nothing_is_requested(restore_sigint):
-    out = io.StringIO()
-    handler = InterruptHandler(stream=out)
-    assert handler.should_stop is False
-    assert out.getvalue() == ""
+def test_install_returns_the_handler_for_chaining():
+    # `InterruptHandler().install()` is how main.py wires it.
+    assert isinstance(InterruptHandler(stream=io.StringIO()).install(),
+                      InterruptHandler)
 
 
-def test_should_stop_is_a_flag_not_a_callable(restore_sigint):
-    """`should_stop` is a property, so it hands back a bool.
+def test_the_handler_does_not_capture_richs_redirected_stderr():
+    """The regression that made Ctrl+C look like a hang.
 
-    The CLI wraps it in a closure before the orchestrator polls it. Passing
-    the property straight through as if it were a method is a mistake this
-    module cannot detect -- it raised `TypeError: 'bool' object is not
-    callable` on a worker thread, where nothing caught it, and the run still
-    exited 0. Pinned here so the wrapper in main.py stays necessary and
-    obvious.
+    ``Live.start()`` replaces ``sys.stderr`` with rich's ``FileProxy``, and the
+    handler captures ``sys.stderr`` at construction. Built after a Live is
+    started, the "Interrupted" line is printed into the Live's render region --
+    which the next refresh (12x/second) overwrites. The user sees nothing and
+    the terminal just sits there. main.py therefore constructs the handler
+    BEFORE ``reporter.busy()``; this pins the ordering's consequence so a
+    future refactor cannot quietly undo it.
     """
-    handler = InterruptHandler(stream=io.StringIO())
-    assert not callable(handler.should_stop)
-    assert handler.should_stop is False
-    handler.request_stop()
-    assert handler.should_stop is True
-    # The wrapper the CLI uses must be the callable the orchestrator wants.
-    assert (lambda: handler.should_stop)() is True
+    import io as _io
+
+    from rich.console import Console
+
+    from li.console import RichReporter
+
+    # Reproduce main._run_download's wiring exactly: handler first, then busy().
+    real_stderr = sys.stderr
+    handler = InterruptHandler()          # captures sys.stderr as it is NOW
+    buf = _io.StringIO()
+    reporter = RichReporter(Console(file=buf, force_terminal=True, width=80))
+    try:
+        reporter.busy("starting Chrome")
+        # rich swapped sys.stderr out from under us...
+        assert sys.stderr is not real_stderr, "expected rich to install a proxy"
+        assert type(sys.stderr).__name__ == "FileProxy"
+        # ...and the handler kept the real one, so its message survives.
+        assert handler._stream is real_stderr
+    finally:
+        reporter.close()

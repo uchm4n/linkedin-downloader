@@ -126,37 +126,18 @@ def test_a_course_header_precedes_the_items(tmp_path):
     assert r.events[1][0] == "start"
 
 
-# --- cooperative stop ----------------------------------------------------
+# --- the walk is unconditional -------------------------------------------
+#
+# There is no longer a cooperative stop to test. Ctrl+C used to set a flag that
+# the walk polled at item boundaries; it now exits the process outright
+# (li/interrupt), because a transfer already in flight cannot be cancelled and
+# waiting for the next boundary is what made the run look hung. The guarantee
+# that survives is on disk, not in the walk: download_to writes a .part sibling
+# and renames it into place, so an interrupted run leaves the last complete file
+# and resume picks up from there. That is pinned in tests/test_storage.py.
 
-def test_should_stop_halts_the_walk_at_the_next_item(tmp_path):
-    # The stop is checked BETWEEN items, never inside one: a video already
-    # half-transferred should be allowed to finish (or clean up after itself)
-    # rather than be abandoned by a flag landing mid-write.
-    r = RecordingReporter()
-    stop = {"flag": False}
-
-    def should_stop():
-        # True from the second item onward.
-        stop["flag"] = True
-        return stop["flag"]
-
-    result = download_course(Provider(_course(["a", "b", "c", "d"])), "c",
-                             tmp_path, "720", _dl(), reporter=r,
-                             should_stop=should_stop)
-    started = [e[1] for e in r.events if e[0] == "start"]
-    assert len(started) < 4, f"walk did not stop early: {started}"
-    assert result.status in ("complete", "partial")
-
-
-def test_a_stop_before_the_first_item_downloads_nothing(tmp_path):
-    r = RecordingReporter()
-    result = download_course(Provider(_course(["a", "b"])), "c", tmp_path, "720",
-                             _dl(), reporter=r, should_stop=lambda: True)
-    assert result.downloaded == 0
-    assert not [e for e in r.events if e[0] == "done"]
-
-
-def test_no_should_stop_means_never_stopping(tmp_path):
+def test_the_walk_visits_every_item(tmp_path):
     result = download_course(Provider(_course(["a", "b"])), "c", tmp_path, "720",
                              _dl())
     assert result.downloaded == 2
+    assert result.status == "complete"

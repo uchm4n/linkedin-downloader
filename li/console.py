@@ -55,9 +55,9 @@ _GAP = 2
 #: losing room. Below this a filename stops being recognisable.
 _MIN_TITLE = 24
 
-#: Glyph per state. The spinner is only ever seen live, so it never reaches
-#: a committed line unless a video somehow completes without a state.
-GLYPH_WORKING = "⠋"
+#: Glyph per committed state. The in-flight marker is not here: it is the
+#: animating frame from :func:`_frame`, so a video being downloaded visibly
+#: moves instead of sitting on one frozen character.
 GLYPH_DONE = "✓"
 GLYPH_SKIP = "○"
 GLYPH_RETRY = "↻"
@@ -66,6 +66,22 @@ GLYPH_FAIL = "✗"
 #: Frames for the startup spinner. Reused across phases so the animation
 #: does not visibly restart between them.
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+#: Frames per second, and the divisor that turns a timestamp into a frame index.
+#: Both branches of :meth:`RichReporter._renderable` go through here, so the
+#: busy spinner and the in-flight video row cannot drift apart.
+_REFRESH_HZ = 12
+
+
+def _frame() -> str:
+    """The spinner glyph for right now.
+
+    Called on every refresh tick, so this is what makes anything drawn from it
+    animate. Computing the frame once per event and handing the result to
+    ``Live.update()`` freezes it: rich re-renders that same object 12 times a
+    second and the character never changes.
+    """
+    return _SPINNER_FRAMES[int(time.monotonic() * _REFRESH_HZ) % len(_SPINNER_FRAMES)]
 
 
 def quiet_scrapling(level: int = logging.WARNING, *, verbose: bool = False) -> None:
@@ -197,23 +213,23 @@ class RichReporter:
     def _renderable(self) -> RenderableType:
         """The live row: the spinner, or the item in flight.
 
-        Rebuilt on EVERY refresh, which is the whole reason the spinner spins.
-        Passing this as ``Live(get_renderable=...)`` rather than calling
-        ``Live.update()`` once per event is what makes it move: rich's refresh
-        thread calls ``refresh()`` ~12x/second and each call re-renders
+        Rebuilt on EVERY refresh, which is the whole reason anything drawn here
+        animates. Passing this as ``Live(get_renderable=...)`` rather than
+        calling ``Live.update()`` once per event is what makes it move: rich's
+        refresh thread calls ``refresh()`` ~12x/second and each call re-renders
         whatever this returns. A pre-built ``Text`` handed to ``update()`` was
-        redrawn unchanged 12 times a second -- a frozen glyph for the whole
-        time Chrome took to start.
+        redrawn unchanged 12 times a second -- a frozen frame for the whole
+        time Chrome took to start, and for the whole time each video took.
 
-        Returns ``""`` where there is no live region to draw in, so a
-        redirected log gets the committed lines only.
+        Both rows animate: the startup/read spinner and the in-flight video.
+        Returns ``""`` where there is no live region to draw in, so a redirected
+        log gets the committed lines only.
         """
         if not (self._live_started and self._console.is_terminal):
             return ""
         if self._busy_text:
-            frame = _SPINNER_FRAMES[int(time.monotonic() * 12) % len(_SPINNER_FRAMES)]
-            return Text(f"{frame} {self._busy_text}", style="cyan")
-        return self._compose(GLYPH_WORKING, "cyan", self._title, "", "")
+            return Text(f"{_frame()} {self._busy_text}", style="cyan")
+        return self._compose(_frame(), "cyan", self._title, "", "")
 
     # -- line composition ------------------------------------------------
     def _compose(self, glyph: str, style: str, title: str, size_field: str, trailing: str, trailing_style: str = "") -> RenderableType:

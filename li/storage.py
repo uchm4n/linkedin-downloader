@@ -21,6 +21,12 @@ import time
 from pathlib import Path
 from li.errors import DownloadFailed, RateLimited
 
+#: Suffix for the in-progress file. A transfer is written here and renamed onto
+#: its destination only once the whole body has landed, so an interrupted write
+#: -- which ``os._exit`` from :mod:`li.interrupt` makes routine -- can never
+#: leave a truncated file at the path resume trusts.
+PART_SUFFIX = ".part"
+
 
 def ensure_dir(p: Path) -> Path:
     """Create ``p`` and its parents if needed, then return it."""
@@ -38,6 +44,10 @@ def download_to(url: str, dest: Path, session, *, attempts: int = 3) -> None:
     transfer and must not masquerade as a complete file on resume. An absent
     ``content-length`` is normal, not a mismatch. Every non-success path runs
     ``dest.unlink(missing_ok=True)`` before raising.
+
+    The body lands in a ``.part`` sibling and is renamed onto ``dest`` only
+    once complete, so an interrupted transfer (which :mod:`li.interrupt` causes
+    on every Ctrl+C) cannot leave a truncated file for resume to trust.
     """
     # ponytail: the whole body is written in one call because scrapling buffers
     # it eagerly (see the module docstring). If a streaming scrapling ever
@@ -80,13 +90,23 @@ def download_to(url: str, dest: Path, session, *, attempts: int = 3) -> None:
                 f"got {len(body)}"
             )
 
+        # Write to a .part sibling, then rename. The rename is the atomic step:
+        # dest either does not exist yet or holds a complete body, which is the
+        # only thing resume's `exists()` check can safely trust.
+        part = dest.with_name(dest.name + PART_SUFFIX)
         try:
             # One write, not a chunk loop: scrapling already buffered the whole
             # body in memory (see the module docstring), so slicing it into
             # 32 KiB pieces would only measure a memory copy.
-            dest.write_bytes(body)
+            part.write_bytes(body)
+            part.replace(dest)
         except BaseException as exc:
-            dest.unlink(missing_ok=True)
+            # Only the .part is removed. dest was never opened by this
+            # transfer, so unlinking it here would destroy a previously
+            # complete download that resume may still be relying on. The
+            # pre-write failure paths above do unlink dest, because there
+            # they are clearing a stale file before retrying it.
+            part.unlink(missing_ok=True)
             if isinstance(exc, Exception):
                 raise DownloadFailed(str(exc)) from exc
             raise
