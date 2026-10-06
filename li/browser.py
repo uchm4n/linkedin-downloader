@@ -141,11 +141,11 @@ _RECIPE_BODIES_JS = "els => els.map(el => el.textContent)"
 
 
 def wait_for_recipe(
-    page: Any,
-    type_suffix: str,
-    *,
-    timeout_s: float | None = None,
-    poll_s: float = RENDER_POLL_S,
+        page: Any,
+        type_suffix: str,
+        *,
+        timeout_s: float | None = None,
+        poll_s: float = RENDER_POLL_S,
 ) -> bool:
     """Delay until ``page``'s DOM holds a ``type_suffix`` recipe block.
 
@@ -211,8 +211,7 @@ class LinkedInBrowser:
     ``profile_dir`` so the next run reuses the login.
     """
 
-    def __init__(self, profile_dir: Path, *, headless: bool = False,
-                 email: str = "", timeout: int = 60) -> None:
+    def __init__(self, profile_dir: Path, *, headless: bool = False, email: str = "", timeout: int = 60) -> None:
         self._profile_dir = Path(profile_dir)
         self._headless = headless
         self._email = email
@@ -282,8 +281,7 @@ class LinkedInBrowser:
                 return False
             time.sleep(1)
 
-    def fetch_html(self, url: str, *, disable_resources: bool = False,
-                   wait_for: str | None = None) -> str:
+    def fetch_html(self, url: str, *, disable_resources: bool = False, wait_for: str | None = None) -> str:
         """Navigate to ``url`` and return the page's HTML.
 
         Sets no ``User-Agent``: Scrapling's ``stealthy_headers`` build
@@ -366,8 +364,7 @@ class LinkedInBrowser:
         expire about 54 minutes after issue.
         """
         self._require_auth()
-        return self._load(video_page_url(course_slug, video_slug), "Video",
-                          video_slug, disable_resources=False)
+        return self._load(video_page_url(course_slug, video_slug), "Video", video_slug, disable_resources=False)
 
     def probe(self, slug: str) -> bool:
         """Is this session able to read a course? (spec section 5.2 step 5)
@@ -388,8 +385,7 @@ class LinkedInBrowser:
             return False
         return next(iter_entities(payload, "Course"), None) is not None
 
-    def _load(self, url: str, type_suffix: str, slug: str, *,
-              disable_resources: bool) -> dict:
+    def _load(self, url: str, type_suffix: str, slug: str, *, disable_resources: bool) -> dict:
         """Fetch ``url`` until it renders a ``type_suffix`` recipe block.
 
         The retry wraps the fetch *and* the parse, and that placement is the
@@ -412,8 +408,7 @@ class LinkedInBrowser:
                 # RENDER_ATTEMPTS is 3 so there is never one.
                 time.sleep(RETRY_BACKOFF_S[attempt - 1])
             try:
-                html = self.fetch_html(url, disable_resources=disable_resources,
-                                       wait_for=type_suffix)
+                html = self.fetch_html(url, disable_resources=disable_resources, wait_for=type_suffix)
                 return self._select(html, type_suffix, slug)
             except (AuthRequired, CourseUnavailable):
                 raise
@@ -451,8 +446,7 @@ class LinkedInBrowser:
         if not authenticated:
             raise AuthRequired(AUTH_REQUIRED_MESSAGE)
 
-    def _fetch(self, url: str, *, disable_resources: bool = False,
-               page_action: Callable | None = None) -> str:
+    def _fetch(self, url: str, *, disable_resources: bool = False, page_action: Callable | None = None) -> str:
         session = self._require_session()
         try:
             response = session.fetch(

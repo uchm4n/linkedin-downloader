@@ -105,7 +105,7 @@ Already have a list? Point at it instead:
 
 | Flag | Applies to | Meaning |
 | --- | --- | --- |
-| `--resolution {360,540,720,1080}` | `download` | Video quality to request (default `720`; only `720` verified live) |
+| `--resolution {1080,720,640}` | `download` | Video quality to request (default `720`). These are the tiers LinkedIn actually serves; a course that lacks the requested one falls back to the next tier down. |
 | `--from-file PATH` | `download`, `status` | One slug or URL per line; `#` comments and blank lines are dropped |
 | `--output-dir PATH` | `download`, `status` | Where to write downloads (default `./downloads`) |
 | `--profile-dir PATH` | all | Persistent Chrome profile (default `./.browser-profile`) |

@@ -30,6 +30,31 @@ def test_invalid_resolution_rejected():
         build_parser().parse_args(["download", "a", "--resolution", "4320"])
 
 
+def test_every_advertised_resolution_is_actually_servable():
+    # The invariant that was broken: argparse offered {360,540,720,1080} while
+    # map_video can only serve a height present in RESOLUTION_TIERS, so 360 and
+    # 540 matched no tier and every single video raised VideoLocked -- after a
+    # page load and a signed-URL fetch each. Anything the CLI accepts must be
+    # something the mapper can honour, or the rejection belongs in argparse.
+    from main import RESOLUTIONS
+    from li.mapping import RESOLUTION_TIERS
+
+    servable = {int(tier) for tier in RESOLUTION_TIERS}
+    for advertised in RESOLUTIONS:
+        assert int(advertised) in servable, (
+            f"--resolution {advertised} is offered but map_video cannot serve it"
+        )
+
+
+def test_a_servable_resolution_survives_argparse():
+    from main import RESOLUTIONS
+
+    for advertised in RESOLUTIONS:
+        assert build_parser().parse_args(
+            ["download", "a", "--resolution", advertised]
+        ).resolution == advertised
+
+
 def test_login_uses_a_visible_window_even_though_headless_is_the_default():
     """A headless login leaves nobody to type the password.
 

@@ -38,13 +38,18 @@ from li.console import build_reporter, configure_logging
 from li.course import download_course
 from li.errors import AuthRequired, LiError
 from li.interrupt import InterruptHandler
+from li.mapping import RESOLUTION_TIERS
 from li.models import Course, CourseResult
 from li.naming import chapter_dir
 from li.providers import BrowserCourseProvider
 from li.storage import download_to
 
-#: The video tiers LinkedIn serves (spec section 9).
-RESOLUTIONS = ("360", "540", "720", "1080")
+#: The video tiers the CLI accepts. This IS li.mapping's tier list, not a
+#: second copy of it: ``map_video`` can only serve a height that appears in
+#: RESOLUTION_TIERS, so advertising anything else (``--resolution 360`` used
+#: to do exactly that) bought a guaranteed VideoLocked per video, after a full
+#: page load and a signed-URL fetch, instead of an argparse rejection up front.
+RESOLUTIONS = RESOLUTION_TIERS
 
 #: Told when no course list exists at all. Same wording as the
 #: ``ValueError`` li.config.resolve_slugs raises for an empty source, so

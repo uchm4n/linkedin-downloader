@@ -27,6 +27,43 @@ def _console():
     return RichReporter(Console(file=buffer, force_terminal=False, width=100)), buffer
 
 
+def test_the_startup_spinner_actually_animates(monkeypatch):
+    # The spinner frame must be recomputed at RENDER time, not once per event.
+    # rich's refresh thread calls Live.refresh() ~12x/second and each call
+    # re-renders Live.get_renderable(); handing it a pre-built Text instead
+    # (Live.update) means it redraws that identical string 12 times a second --
+    # a spinner that spins and never moves, which is what `busy` showed for the
+    # whole time Chrome took to start up.
+    #
+    # The clock is stubbed rather than slept through: what this pins is that
+    # the renderable is a live callable, not that rich's thread calls it.
+    import li.console as console_mod
+
+    buffer = io.StringIO()
+    r = RichReporter(Console(file=buffer, force_terminal=True, width=80))
+    try:
+        r.busy("starting Chrome")
+        assert r._live._get_renderable is not None, "Live was not given a live renderable"
+        frames = set()
+        for tick in range(6):
+            monkeypatch.setattr(console_mod.time, "monotonic", lambda: tick / 12)
+            frames.add(str(r._live.get_renderable()).split()[0])
+    finally:
+        r.close()
+    assert len(frames) > 1, f"the busy spinner never changed frame: {frames}"
+
+
+def test_no_live_region_where_the_console_is_not_a_terminal():
+    # A redirected log has no live region to animate. The renderable must be
+    # empty there, or rich would print the spinner into the log file.
+    r, _ = _console()
+    r.busy("starting Chrome")
+    try:
+        assert str(r._live.get_renderable()) == ""
+    finally:
+        r.close()
+
+
 def test_each_video_commits_exactly_one_line():
     r, buf = _console()
     r.start("01 - One")

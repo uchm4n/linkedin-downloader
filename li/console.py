@@ -178,8 +178,10 @@ class RichReporter:
         self._quiet = quiet
         self._title = ""
         self._busy_text = ""
-        self._live = Live(console=console, refresh_per_second=12, transient=True)
+        # _live_started must exist before Live is built: Live.__init__ calls
+        # get_renderable() straight away, and _renderable() reads this flag.
         self._live_started = False
+        self._live = Live(console=console, refresh_per_second=12, transient=True, get_renderable=self._renderable)
 
     # -- Live lifecycle ---------------------------------------------------
     def _ensure_live(self) -> None:
@@ -192,20 +194,29 @@ class RichReporter:
             self._live.stop()
             self._live_started = False
 
-    def _paint_live(self) -> None:
-        """Show the spinner or the in-flight row, but only where a live
-        region exists -- a redirected log gets the committed lines only."""
+    def _renderable(self) -> RenderableType:
+        """The live row: the spinner, or the item in flight.
+
+        Rebuilt on EVERY refresh, which is the whole reason the spinner spins.
+        Passing this as ``Live(get_renderable=...)`` rather than calling
+        ``Live.update()`` once per event is what makes it move: rich's refresh
+        thread calls ``refresh()`` ~12x/second and each call re-renders
+        whatever this returns. A pre-built ``Text`` handed to ``update()`` was
+        redrawn unchanged 12 times a second -- a frozen glyph for the whole
+        time Chrome took to start.
+
+        Returns ``""`` where there is no live region to draw in, so a
+        redirected log gets the committed lines only.
+        """
         if not (self._live_started and self._console.is_terminal):
-            return
+            return ""
         if self._busy_text:
             frame = _SPINNER_FRAMES[int(time.monotonic() * 12) % len(_SPINNER_FRAMES)]
-            self._live.update(Text(f"{frame} {self._busy_text}", style="cyan"))
-            return
-        self._live.update(self._compose(GLYPH_WORKING, "cyan", self._title, "", ""))
+            return Text(f"{frame} {self._busy_text}", style="cyan")
+        return self._compose(GLYPH_WORKING, "cyan", self._title, "", "")
 
     # -- line composition ------------------------------------------------
-    def _compose(self, glyph: str, style: str, title: str,
-                 size_field: str, trailing: str, trailing_style: str = "") -> RenderableType:
+    def _compose(self, glyph: str, style: str, title: str, size_field: str, trailing: str, trailing_style: str = "") -> RenderableType:
         """Build exactly one line, truncating the title before the reason.
 
         Width is budgeted explicitly rather than left to a
@@ -243,15 +254,13 @@ class RichReporter:
             line.append(f"{' ' * _GAP}{trailing}", style=trailing_style or style)
         return line
 
-    def _commit(self, glyph: str, style: str, size_field: str = "",
-                trailing: str = "", trailing_style: str = "") -> None:
+    def _commit(self, glyph: str, style: str, size_field: str = "", trailing: str = "", trailing_style: str = "") -> None:
         """Print one finished line permanently and free the live slot."""
         self._stop_live()
         title = self._title
         self._title = ""
         if title:
-            self._console.print(self._compose(glyph, style, title,
-                                              size_field, trailing, trailing_style))
+            self._console.print(self._compose(glyph, style, title, size_field, trailing, trailing_style))
         elif trailing:
             # An outcome with no open row (a course-level failure) still has
             # to be said; print the text on its own rather than dropping it.
@@ -278,13 +287,11 @@ class RichReporter:
             return
         self._busy_text = text
         self._ensure_live()
-        self._paint_live()
 
     def start(self, title: str) -> None:
         self._finish_open_row()
         self._title = title
         self._ensure_live()
-        self._paint_live()
 
     def note(self, text: str) -> None:
         """Report a retry: commit the attempt, then keep the row open."""
@@ -295,7 +302,6 @@ class RichReporter:
         if not self._quiet:
             self._console.print(self._compose(GLYPH_RETRY, "yellow", title, "", text))
         self._ensure_live()
-        self._paint_live()
 
     def done(self, size: int, secs: float) -> None:
         if not self._title:
@@ -303,8 +309,7 @@ class RichReporter:
         if self._quiet:
             self._finish_open_row()
             return
-        self._commit(GLYPH_DONE, "green",
-                     f"{format_size(size)}  {secs:.1f}s")
+        self._commit(GLYPH_DONE, "green", f"{format_size(size)}  {secs:.1f}s")
 
     def skip(self, reason: str = "") -> None:
         if not self._title:
